@@ -8,7 +8,7 @@
 #define INPUT_CH '>'
 
 
-typedef enum { retOK, retErr, retEOFOK, retEOFErr } ret_result_t;
+typedef enum { RET_OK, RET_ERR, RET_EOF_OK, RET_EOF_ERR } ret_result_t;
 
 void checkStringLen (char **str, int len)
 {
@@ -34,7 +34,7 @@ void endString (char **params, int nparams, int len)
 
 ret_result_t readCommand (char ***params, int *nparams)
 {
-	enum { inInitial, inWord, inBetween, inScreen, inQuotes, inComment, inError } state = inInitial;
+	enum { IN_INITIAL, IN_WORD, IN_BETWEEN, IN_SCREEN, IN_QUOTES, IN_COMMENT, IN_ERROR } state = IN_INITIAL, previous;
 	char ch;
 	int len = 0;
 
@@ -46,7 +46,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 		ch = getchar ();
 		switch (state)
 		{
-			case inInitial:
+			case IN_INITIAL:
 				if (ch == '\n' || ch == '#')
 				{
 					(*nparams)++;
@@ -54,24 +54,25 @@ ret_result_t readCommand (char ***params, int *nparams)
 					(*params)[0][0] = '\0';
 				}
 				
-			case inBetween:
+			case IN_BETWEEN:
 				if (ch == EOF)
-					return retEOFOK;
+					return RET_EOF_OK;
 				else if (ch == '\n')
-					return retOK;
+					return RET_OK;
 				else if (ch == '\\')
 				{
-					state = inScreen;
+					previous = IN_WORD;
+					state = IN_SCREEN;
 					(*nparams)++;
 					checkParamCnt (params, *nparams);
 					(*params)[*nparams - 1] = calloc (STR_SIZE, sizeof (char));
 					len = 0;
 				}
 				else if (ch == '#')
-					state = inComment;
+					state = IN_COMMENT;
 				else if (ch == '"')
 				{
-					state = inQuotes;
+					state = IN_QUOTES;
 					(*nparams)++;
 					checkParamCnt (params, *nparams);
 					(*params)[*nparams - 1] = calloc (STR_SIZE, sizeof (char));
@@ -81,7 +82,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 					;
 				else
 				{
-					state = inWord;
+					state = IN_WORD;
 					(*nparams)++;
 					checkParamCnt (params, *nparams);
 					(*params)[*nparams - 1] = calloc (STR_SIZE, sizeof (char));
@@ -90,29 +91,32 @@ ret_result_t readCommand (char ***params, int *nparams)
 				}
 				break;
 
-			case inWord:
+			case IN_WORD:
 				if (ch == EOF)
 				{
 					endString (*params, *nparams, len);
-					return retEOFOK;
+					return RET_EOF_OK;
 				}
 				else if (ch == '\n')
 				{
 					endString (*params, *nparams, len);
-					return retOK;
+					return RET_OK;
 				}
 				else if (ch == '\\')
-					state = inScreen;
+				{
+					previous = IN_WORD;
+					state = IN_SCREEN;
+				}
 				else if (ch == '#')
 				{
-					state = inComment;
+					state = IN_COMMENT;
 					endString (*params, *nparams, len);
 				}
 				else if (ch == '"')
-					state = inError;
+					state = IN_ERROR;
 				else if (isspace (ch))
 				{
-					state = inBetween;
+					state = IN_BETWEEN;
 					endString (*params, *nparams, len);
 				}
 				else
@@ -123,28 +127,35 @@ ret_result_t readCommand (char ***params, int *nparams)
 				}
 				break;
 
-			case inScreen:
+			case IN_SCREEN:
 				if (ch == EOF)
-					return retEOFErr;
+					return RET_EOF_ERR;
+				else if (ch == '\n')
+					return RET_ERR;
 				else if (ch == '\\' || ch == '#' || ch == '"')
 				{
-					state = inWord;
+					state = previous;
 					checkStringLen (*params + *nparams - 1, len + 1);
 					(*params)[*nparams - 1][len] = ch;
 					len++;
 				}
 				else
-					state = inError;
+					state = IN_ERROR;
 				break;
 
-			case inQuotes:
+			case IN_QUOTES:
 				if (ch == EOF)
-					return retEOFErr;
+					return RET_EOF_ERR;
 				else if (ch == '\n')
-					state = inError;
+					return RET_ERR;
+				else if (ch == '\\')
+				{
+					previous = IN_QUOTES;
+					state = IN_SCREEN;
+				}
 				else if (ch == '"')
 				{
-					state = inBetween;
+					state = IN_WORD;
 					endString (*params, *nparams, len);
 				}
 				else
@@ -155,28 +166,31 @@ ret_result_t readCommand (char ***params, int *nparams)
 				}
 				break;
 
-			case inComment:
+			case IN_COMMENT:
 				if (ch == EOF)
-					return retEOFOK;
+					return RET_EOF_OK;
 				if (ch == '\n')
-					return retOK;
+					return RET_OK;
 				break;
 
-			case inError:
+			case IN_ERROR:
 				if (ch == EOF)
-					return retEOFErr;
+					return RET_EOF_ERR;
 				if (ch == '\n')
-					return retErr;
+					return RET_ERR;
 				break;
 		}
 	}
 
-	return retErr;
+	return RET_ERR;
 }
 
 void clearStrings (char ***params, int nparams)
 {
 	int i;
+
+	if (params == NULL)
+		return;
 
 	for (i = 0; i < nparams; i++)
 		free ((*params)[i]);
@@ -193,9 +207,9 @@ int main ()
 
 	putchar (INPUT_CH);
 
-	while ( (ret = readCommand (&params, &nparams)) != retEOFOK && ret != retEOFErr)
+	while ( (ret = readCommand (&params, &nparams)) != RET_EOF_OK && ret != RET_EOF_ERR)
 	{
-		if (ret == retErr)
+		if (ret == RET_ERR)
 			puts ("Wrong format!");
 		else
 			for (i = 0; i < nparams; i++)
@@ -204,7 +218,7 @@ int main ()
 		clearStrings (&params, nparams);
 	}
 	
-	if (ret == retEOFOK)
+	if (ret == RET_EOF_OK)
 		for (i = 0; i < nparams; i++)
 			puts (params[i]);
 	else
