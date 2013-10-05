@@ -3,33 +3,87 @@
 #include <stdlib.h>
 #include <ctype.h>
 
-#define STR_SIZE 10
-#define PARAM_COUNT 3
+#define STR_SIZE 128
+#define PARAM_COUNT 4
 #define INPUT_CH '>'
 
+typedef enum { RET_OK, RET_ERR, RET_EOFOK, RET_EOFERR, RET_MEMORYERR } ret_result_t;
 
-typedef enum { RET_OK, RET_ERR, RET_EOF_OK, RET_EOF_ERR } ret_result_t;
-
-void checkStringLen (char **str, int len)
+int checkStringLen (char **str, int len)
 {
+	char *ptr;
+
 	if (len % STR_SIZE)
-		return;
-	*str = realloc (*str, (len + STR_SIZE) * sizeof (char));
+		return 0;
+
+	if ((ptr = realloc (*str, (len + STR_SIZE) * sizeof (char))))
+	{
+		*str = ptr;
+		return 0;
+	}
+
+	return 1;
 }
 
-void checkParamCnt (char ***params, int nparams)
+int checkParamCnt (char ***params, int nparams)
 {
+	char **ptr;
+
 	if (nparams % PARAM_COUNT)
-		return;
-	*params = realloc (*params, (nparams + PARAM_COUNT) * sizeof (char *));
+		return 0;
+
+	if ((ptr = realloc (*params, (nparams + PARAM_COUNT) * sizeof (char *))))
+	{
+		*params = ptr;
+		return 0;
+	}
+
+	return 1;
 }
 
-void endString (char **params, int nparams, int len)
+int endString (char **params, int nparams, int len)
 {
-	if (len % STR_SIZE == 0)
-		params[nparams - 1] = realloc (params[nparams - 1], (len + 1) * sizeof (char));
-	params[nparams - 1][len] = '\0';
+	char * ptr;
 
+	if (len % STR_SIZE != 0)
+	{
+		params[nparams - 1][len] = '\0';
+		return 0;
+	}
+
+	if ((ptr = realloc (params[nparams - 1], (len + 1) * sizeof (char))))
+	{
+		params[nparams - 1] = ptr;
+		params[nparams - 1][len] = '\0';
+		return 0;
+	}
+
+	return 1;
+}
+
+int addChar (char **str, int *len, char ch)
+{
+	if (checkStringLen (str, *len))
+		return 1;
+
+	(*str)[*len] = ch;
+	(*len)++;
+
+	return 0;
+}
+
+int addParam (char ***params, int *nparams)
+{	
+	if (*nparams)
+		if (checkParamCnt (params, *nparams))
+			return 1;
+	if (((*params)[*nparams] = calloc (STR_SIZE, sizeof (char))))
+	{
+		(*nparams)++;
+		return 0;
+	}
+
+	return 1;
 }
 
 ret_result_t readCommand (char ***params, int *nparams)
@@ -39,9 +93,10 @@ ret_result_t readCommand (char ***params, int *nparams)
 	int len = 0;
 
 	*nparams = 0;
-	*params = calloc (PARAM_COUNT, sizeof (char *));
+	if (!(*params = calloc (PARAM_COUNT, sizeof (char *))))
+		return RET_MEMORYERR;
 	
-	for (;;)
+	while (1)
 	{
 		ch = getchar ();
 		switch (state)
@@ -49,23 +104,22 @@ ret_result_t readCommand (char ***params, int *nparams)
 			case IN_INITIAL:
 				if (ch == '\n' || ch == '#')
 				{
-					(*nparams)++;
-					(*params)[0] = calloc (STR_SIZE, sizeof (char));
+					if (addParam (params, nparams))
+						return RET_MEMORYERR;
 					(*params)[0][0] = '\0';
 				}
 				
 			case IN_BETWEEN:
 				if (ch == EOF)
-					return RET_EOF_OK;
+					return RET_EOFOK;
 				else if (ch == '\n')
 					return RET_OK;
 				else if (ch == '\\')
 				{
 					previous = IN_WORD;
 					state = IN_SCREEN;
-					(*nparams)++;
-					checkParamCnt (params, *nparams);
-					(*params)[*nparams - 1] = calloc (STR_SIZE, sizeof (char));
+					if (addParam (params, nparams))
+						return RET_MEMORYERR;
 					len = 0;
 				}
 				else if (ch == '#')
@@ -73,9 +127,8 @@ ret_result_t readCommand (char ***params, int *nparams)
 				else if (ch == '"')
 				{
 					state = IN_QUOTES;
-					(*nparams)++;
-					checkParamCnt (params, *nparams);
-					(*params)[*nparams - 1] = calloc (STR_SIZE, sizeof (char));
+					if (addParam (params, nparams))
+						return RET_MEMORYERR;
 					len = 0;
 				}
 				else if (isspace (ch))
@@ -83,9 +136,8 @@ ret_result_t readCommand (char ***params, int *nparams)
 				else
 				{
 					state = IN_WORD;
-					(*nparams)++;
-					checkParamCnt (params, *nparams);
-					(*params)[*nparams - 1] = calloc (STR_SIZE, sizeof (char));
+					if (addParam (params, nparams))
+						return RET_MEMORYERR;
 					len = 1;
 					(*params)[*nparams - 1][0] = ch;
 				}
@@ -94,12 +146,14 @@ ret_result_t readCommand (char ***params, int *nparams)
 			case IN_WORD:
 				if (ch == EOF)
 				{
-					endString (*params, *nparams, len);
-					return RET_EOF_OK;
+					if (endString (*params, *nparams, len))
+						return RET_MEMORYERR;
+					return RET_EOFOK;
 				}
 				else if (ch == '\n')
 				{
-					endString (*params, *nparams, len);
+					if (endString (*params, *nparams, len))
+						return RET_MEMORYERR;
 					return RET_OK;
 				}
 				else if (ch == '\\')
@@ -110,34 +164,32 @@ ret_result_t readCommand (char ***params, int *nparams)
 				else if (ch == '#')
 				{
 					state = IN_COMMENT;
-					endString (*params, *nparams, len);
+					if (endString (*params, *nparams, len))
+						return RET_MEMORYERR;
 				}
 				else if (ch == '"')
 					state = IN_ERROR;
 				else if (isspace (ch))
 				{
 					state = IN_BETWEEN;
-					endString (*params, *nparams, len);
+					if (endString (*params, *nparams, len))
+						return RET_MEMORYERR;
 				}
 				else
-				{
-					checkStringLen (*params + *nparams - 1, len + 1);
-					(*params)[*nparams - 1][len] = ch;
-					len++;
-				}
+					if (addChar (*params + *nparams - 1, &len, ch))
+						return RET_MEMORYERR;
 				break;
 
 			case IN_SCREEN:
 				if (ch == EOF)
-					return RET_EOF_ERR;
+					return RET_EOFERR;
 				else if (ch == '\n')
 					return RET_ERR;
 				else if (ch == '\\' || ch == '#' || ch == '"')
 				{
 					state = previous;
-					checkStringLen (*params + *nparams - 1, len + 1);
-					(*params)[*nparams - 1][len] = ch;
-					len++;
+					if (addChar (*params + *nparams - 1, &len, ch))
+						return RET_MEMORYERR;
 				}
 				else
 					state = IN_ERROR;
@@ -145,7 +197,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 
 			case IN_QUOTES:
 				if (ch == EOF)
-					return RET_EOF_ERR;
+					return RET_EOFERR;
 				else if (ch == '\n')
 					return RET_ERR;
 				else if (ch == '\\')
@@ -156,33 +208,29 @@ ret_result_t readCommand (char ***params, int *nparams)
 				else if (ch == '"')
 				{
 					state = IN_WORD;
-					endString (*params, *nparams, len);
+					if (endString (*params, *nparams, len))
+						return RET_MEMORYERR;
 				}
 				else
-				{
-					checkStringLen (*params + *nparams - 1, len + 1);
-					(*params)[*nparams - 1][len] = ch;
-					len++;
-				}
+					if (addChar (*params + *nparams - 1, &len, ch))
+						return RET_MEMORYERR;
 				break;
 
 			case IN_COMMENT:
 				if (ch == EOF)
-					return RET_EOF_OK;
+					return RET_EOFOK;
 				if (ch == '\n')
 					return RET_OK;
 				break;
 
 			case IN_ERROR:
 				if (ch == EOF)
-					return RET_EOF_ERR;
+					return RET_EOFERR;
 				if (ch == '\n')
 					return RET_ERR;
 				break;
 		}
 	}
-
-	return RET_ERR;
 }
 
 void clearStrings (char ***params, int nparams)
@@ -199,28 +247,40 @@ void clearStrings (char ***params, int nparams)
 	*params = NULL;
 }
 
+void executeCommand (char **params, int nparams)
+{
+	int i;
+
+	for (i = 0; i < nparams; i++)
+		puts (params[i]);
+}
+
 int main ()
 {
-	int nparams, i;
+	int nparams;
 	char **params = NULL;
 	ret_result_t ret;
 
 	putchar (INPUT_CH);
 
-	while ( (ret = readCommand (&params, &nparams)) != RET_EOF_OK && ret != RET_EOF_ERR)
+	while ((ret = readCommand (&params, &nparams)) < RET_EOFOK)
 	{
 		if (ret == RET_ERR)
 			puts ("Wrong format!");
 		else
-			for (i = 0; i < nparams; i++)
-				puts (params[i]);
+			executeCommand (params, nparams);
+
 		putchar (INPUT_CH);
 		clearStrings (&params, nparams);
 	}
 	
-	if (ret == RET_EOF_OK)
-		for (i = 0; i < nparams; i++)
-			puts (params[i]);
+	if (ret == RET_EOFOK)
+		executeCommand (params, nparams);
+	else if (ret == RET_MEMORYERR)
+	{
+		putchar ('\n');
+		puts ("Memory allocation error!");
+	}
 	else
 	{
 		putchar ('\n');
