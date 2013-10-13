@@ -20,7 +20,7 @@ int checkStringLen (char **str, int len)
 	if (len % STR_SIZE)
 		return 0;
 
-	if ((ptr = realloc (*str, (len + STR_SIZE) * sizeof (char))))
+	if ((ptr = realloc (*str, (len + STR_SIZE) * sizeof (char))) != NULL)
 	{
 		*str = ptr;
 		return 0;
@@ -36,7 +36,7 @@ int checkParamCnt (char ***params, int nparams)
 	if (nparams % PARAM_COUNT)
 		return 0;
 
-	if ((ptr = realloc (*params, (nparams + PARAM_COUNT) * sizeof (char *))))
+	if ((ptr = realloc (*params, (nparams + PARAM_COUNT) * sizeof (char *))) != NULL)
 	{
 		*params = ptr;
 		return 0;
@@ -55,7 +55,7 @@ int endString (char **params, int nparams, int len)
 		return 0;
 	}
 
-	if ((ptr = realloc (params[nparams - 1], (len + 1) * sizeof (char))))
+	if ((ptr = realloc (params[nparams - 1], (len + 1) * sizeof (char))) != NULL)
 	{
 		params[nparams - 1] = ptr;
 		params[nparams - 1][len] = '\0';
@@ -81,7 +81,7 @@ int addParam (char ***params, int *nparams)
 	if (*nparams)
 		if (checkParamCnt (params, *nparams + 1))
 			return 1;
-	if (((*params)[*nparams] = calloc (STR_SIZE, sizeof (char))))
+	if (((*params)[*nparams] = calloc (STR_SIZE, sizeof (char))) != NULL)
 	{
 		(*nparams)++;
 		return 0;
@@ -93,11 +93,10 @@ int addParam (char ***params, int *nparams)
 ret_result_t readCommand (char ***params, int *nparams)
 {
 	enum { IN_INITIAL, IN_WORD, IN_BETWEEN, IN_SCREEN, IN_QUOTES, IN_COMMENT, IN_ERROR } state = IN_INITIAL, previous;
-	char ch;
-	int len = 0;
+	int ch, len = 0;
 
 	*nparams = 0;
-	if (!(*params = calloc (PARAM_COUNT, sizeof (char *))))
+	if ((*params = calloc (PARAM_COUNT, sizeof (char *))) == NULL)
 		return RET_MEMORYERR;
 	
 	while (1)
@@ -256,8 +255,8 @@ int placeEnv (char **params, int nparams)
 	int i;
 	for (i = 0; i < nparams; i++)
 	{
-		int len = strlen (params[i]), posp = 0, poss = 0;
-		char *s, ch;
+		int len = strlen (params[i]), posp = 0, poss = 0, ch;
+		char *s;
 
 		if (len < 2 || !strchr (params[i], '$'))
 			continue;
@@ -279,7 +278,7 @@ int placeEnv (char **params, int nparams)
 				break;
 			start = posp + 1;
 
-			while (++posp < len && isalpha (params[i][posp]));
+			while (++posp < len && isalpha ((int)params[i][posp]));
 
 			ch = params[i][posp];
 			params[i][posp] = '\0';
@@ -350,6 +349,7 @@ int executeCommand (char **params, int nparams)
 		wait (NULL);
 	else
 	{
+		signal (SIGINT, SIG_DFL);
 		params[nparams] = NULL;
 		execvp (params[0], params);
 		perror ("Error executing command ");
@@ -377,7 +377,7 @@ int setEnvVars ()
 	}
 
 	sprintf (buf, "%d", geteuid ());
-	if (setenv ("PUID", buf, 1) == -1)
+	if (setenv ("EUID", buf, 1) == -1)
 	{
 		perror ("Error setting puid ");
 		return 1;
