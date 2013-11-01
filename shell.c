@@ -1,6 +1,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -9,7 +10,7 @@
 
 #define STR_SIZE 128
 #define PARAM_COUNT 4
-#define INPUT_CH '>'
+#define INPUT_STR "$ "
 #define BUF_SIZE 1024
 
 typedef enum { RET_OK, RET_ERR, RET_EOFOK, RET_EOFERR, RET_MEMORYERR } ret_result_t;
@@ -151,7 +152,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 		switch (state)
 		{
 			case IN_INITIAL:
-				if (ch == '\n' || ch == '#')
+				if (ch == '\n' || ch == '#' || ch == EOF)
 				{
 					if (addParam (params, nparams))
 						return RET_MEMORYERR;
@@ -305,7 +306,7 @@ void clearStrings (char ***params, int nparams)
  * Changes environmental variable names prefixed with $ to their values
  * @param params	pointer to a string array
  * @param nparams	strings count
- * @return		0 on success, 1 on error
+ * @return			0 on success, 1 on error
  */
 int placeEnv (char **params, int nparams)
 {
@@ -364,31 +365,31 @@ int placeEnv (char **params, int nparams)
 }
 
 /**
- * Executes shell command(s) given in the string array, pipes them together
- * @param params	pointer to a string array
+ * Executes one shell command given in the string array
+ * @param command	pointer to a string array
  * @param nparams	strings count
  * @return		0 on success, 1 on error
  */
-int executeCommand (char **params, int nparams)
+int executeCommand (char **command, int nparams)
 {
-	pid_t pid;
+	signal (SIGINT, SIG_DFL);
 
-	if (!nparams || params[0][0] == '\0')
-		return 0;
+	if (!nparams || command[0][0] == '\0')
+		exit (0);
 
-	if (!strcmp (params[0], "pwd"))
+	if (!strcmp (command[0], "pwd"))
 	{
 		char *s = getcwd (NULL, 0);
 		if (s == NULL)
 		{
 			perror ("Error getting current directory ");
-			return 0;
+			exit (0);
 		}
 		puts (s);
 		free (s);
-		return 0;
+		exit (0);
 	}
-	if (!strcmp (params[0], "cd"))
+	if (!strcmp (command[0], "cd"))
 	{
 		if (nparams == 1)
 		{
@@ -396,25 +397,125 @@ int executeCommand (char **params, int nparams)
 				perror ("Error changing directory ");
 		}
 		else
-			if (chdir (params[1]))
+			if (chdir (command[1]))
 				perror ("Error changing directory ");
+		exit(0);
+	}
+
+	command[nparams] = NULL;
+	execvp (command[0], command);
+	perror ("Error executing command ");
+	exit (0);
+}
+
+
+/**
+ *
+ *
+ */
+int checkSyntax (char **params, int nparams)
+{
+	if (!strcmp (params[nparams - 1], ">") || !strcmp (params[nparams - 1], "<") || !strcmp (params[nparams - 1], "<<") ||
+	    !strcmp (params[nparams - 1], ">>") || !strcmp (params[nparams - 1], "|"))
+	    return 1;
+	return 0;
+}
+
+/**
+ *
+ *
+ */
+int doCommands (char **params, int nparams)
+{
+	pid_t pid;
+	int i = 0, j, conv, cnt, pipes[2][2]={{0}}, fd;
+	char **command;
+
+	if (checkSyntax (params, nparams))
+	{
+		puts ("Unexpected end of line");
 		return 0;
 	}
-	if (!strcmp (params[0], "exit"))
-		return 1;
 
-	if ((pid = fork ()) < 0)
-		perror ("Error creating child process ");
-	else if (pid)
-		wait (NULL);
-	else
+	while (i < nparams)
 	{
-		signal (SIGINT, SIG_DFL);
-		params[nparams] = NULL;
-		execvp (params[0], params);
-		perror ("Error executing command ");
-		exit (0);
+		if (!strcmp (params[i], "exit"))
+			return 1;
+
+		conv = i;
+		cnt = 0;
+		while (++conv < nparams && strcmp (params[conv], "|"));
+		if ((command = calloc (conv - i + 1, sizeof (char *))) == NULL)
+			return 0;
+
+		if (i > 0)
+		{
+			if (pipes[0][0])
+				close (pipes[0][0]);
+			close (pipes[1][1]);
+			memcpy (pipes[0], pipes[1], sizeof (pipes[1]));
+		}
+		if (conv < nparams)
+			pipe (pipes[1]);
+
+		if ((pid = fork ()) < 0)
+		{
+			perror ("Error creating child process ");
+			clearStrings (&command, cnt);
+			return 0;
+		}
+		else if (!pid)
+		{
+			if (i > 0)
+			{
+				dup2 (pipes[0][0], 0);
+				close (pipes[0][0]);
+			}
+			if (conv < nparams)
+			{
+				dup2 (pipes[1][1], 1);
+				close (pipes[1][0]);
+				close (pipes[1][1]);
+			}
+
+			for (j = i; j < conv; j++)
+				if (!strcmp (params[j], "<") || !strcmp (params[j], "<<"))
+				{
+					fd = open (params[j + 1], O_RDONLY);
+					dup2 (fd, 0);
+					close (fd);
+					j++;
+				}
+				else if (!strcmp (params[j], ">"))
+				{
+					fd = open (params[j + 1], O_WRONLY | O_CREAT | O_TRUNC, 0666);
+					dup2 (fd, 1);
+					close (fd);
+					j++;
+				}
+				else if (!strcmp (params[j], ">>"))
+				{
+					fd = open (params[j + 1], O_WRONLY | O_CREAT | O_APPEND, 0666);
+					dup2 (fd, 1);
+					close (fd);
+					j++;
+				}
+				else
+				{
+					command[cnt++] = calloc (strlen (params[j]) + 1, sizeof (char));
+					strcpy (command[cnt - 1], params[j]);
+				}
+
+			command[cnt] = NULL;
+			executeCommand (command, cnt);
+		}
+		clearStrings (&command, cnt);
+		i = conv + 1;
 	}
+
+	waitpid (pid, NULL, 0);
+	if (pipes[0][0])
+		close (pipes[0][0]);
 
 	return 0;
 }
@@ -471,7 +572,7 @@ int main ()
 	if (setEnvVars ())
 		return 1;
 
-	putchar (INPUT_CH);
+	printf (INPUT_STR);
 
 	while ((ret = readCommand (&params, &nparams)) < RET_EOFOK)
 	{
@@ -481,16 +582,16 @@ int main ()
 		{
 			if (placeEnv (params, nparams))
 				continue;
-			if (executeCommand (params, nparams))
+			if (doCommands (params, nparams))
 				break;
 		}
 
-		putchar (INPUT_CH);
+		printf (INPUT_STR);
 		clearStrings (&params, nparams);
 	}
 
 	if (ret == RET_EOFOK)
-		executeCommand (params, nparams);
+		doCommands (params, nparams);
 	else if (ret == RET_MEMORYERR)
 	{
 		putchar ('\n');
