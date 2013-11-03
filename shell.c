@@ -10,10 +10,10 @@
 
 #define STR_SIZE 128
 #define PARAM_COUNT 4
-#define INPUT_STR "$ "
 #define BUF_SIZE 1024
+#define INPUT_STR "$ "
 
-typedef enum { RET_OK, RET_ERR, RET_EOFOK, RET_EOFERR, RET_MEMORYERR } ret_result_t;
+typedef enum { RET_OK, RET_ERR, RET_EOF, RET_MEMORYERR } ret_result_t;
 
 /**
  * Checks if there is enough allocated space to add another charachter to a string and allocates new
@@ -63,25 +63,24 @@ int checkParamCnt (char ***params, int nparams)
 
 /**
  * Adds null terminator to a string and allocates new memory if necessary
- * @param params	pointer to a string array
- * @param nstr		number of string to end
+ * @param str		pointer to a string
  * @param len		current string length
  * @return			0 on success, 1 on error
  */
-int endString (char **params, int nstr, int len)
+int endString (char **str, int len)
 {
 	char *ptr;
 
 	if (len % STR_SIZE != 0)
 	{
-		params[nstr - 1][len] = '\0';
+		(*str)[len] = '\0';
 		return 0;
 	}
 
-	if ((ptr = realloc (params[nstr - 1], (len + 1) * sizeof (char))) != NULL)
+	if ((ptr = realloc (*str, (len + 1) * sizeof (char))) != NULL)
 	{
-		params[nstr - 1] = ptr;
-		params[nstr - 1][len] = '\0';
+		*str = ptr;
+		(*str)[len] = '\0';
 		return 0;
 	}
 
@@ -133,8 +132,7 @@ int addParam (char ***params, int *nparams)
  * @param nparams	pointer to an integer to return substring count
  * @return			RET_OK - command is correct
  *					RET_ERR - wrong command format
- *					RET_EOFOK - EOF found, and last command is correct
- *					RET_EOFERR - EOF found, and last command is in the wrong format
+ *					RET_EOF - EOF found
  *					RET_MEMORYERR - memory allocation error
  */
 ret_result_t readCommand (char ***params, int *nparams)
@@ -149,6 +147,8 @@ ret_result_t readCommand (char ***params, int *nparams)
 	while (1)
 	{
 		ch = getchar ();
+		if (ch == EOF && state != IN_INITIAL)
+			return RET_EOF;
 		switch (state)
 		{
 			case IN_INITIAL:
@@ -157,12 +157,12 @@ ret_result_t readCommand (char ***params, int *nparams)
 					if (addParam (params, nparams))
 						return RET_MEMORYERR;
 					(*params)[0][0] = '\0';
+					if (ch == EOF)
+						return RET_EOF;
 				}
 
 			case IN_BETWEEN:
-				if (ch == EOF)
-					return RET_EOFOK;
-				else if (ch == '\n')
+				if (ch == '\n')
 					return RET_OK;
 				else if (ch == '\\')
 				{
@@ -194,15 +194,9 @@ ret_result_t readCommand (char ***params, int *nparams)
 				break;
 
 			case IN_WORD:
-				if (ch == EOF)
+				if (ch == '\n')
 				{
-					if (endString (*params, *nparams, len))
-						return RET_MEMORYERR;
-					return RET_EOFOK;
-				}
-				else if (ch == '\n')
-				{
-					if (endString (*params, *nparams, len))
+					if (endString (*params + *nparams - 1, len))
 						return RET_MEMORYERR;
 					return RET_OK;
 				}
@@ -214,7 +208,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 				else if (ch == '#')
 				{
 					state = IN_COMMENT;
-					if (endString (*params, *nparams, len))
+					if (endString (*params + *nparams - 1, len))
 						return RET_MEMORYERR;
 				}
 				else if (ch == '"')
@@ -222,7 +216,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 				else if (isspace (ch))
 				{
 					state = IN_BETWEEN;
-					if (endString (*params, *nparams, len))
+					if (endString (*params + *nparams - 1, len))
 						return RET_MEMORYERR;
 				}
 				else
@@ -231,9 +225,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 				break;
 
 			case IN_SCREEN:
-				if (ch == EOF)
-					return RET_EOFERR;
-				else if (ch == '\n')
+				if (ch == '\n')
 					return RET_ERR;
 				else if (ch == '\\' || ch == '#' || ch == '"')
 				{
@@ -246,9 +238,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 				break;
 
 			case IN_QUOTES:
-				if (ch == EOF)
-					return RET_EOFERR;
-				else if (ch == '\n')
+				if (ch == '\n')
 					return RET_ERR;
 				else if (ch == '\\')
 				{
@@ -258,7 +248,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 				else if (ch == '"')
 				{
 					state = IN_WORD;
-					if (endString (*params, *nparams, len))
+					if (endString (*params + *nparams - 1, len))
 						return RET_MEMORYERR;
 				}
 				else
@@ -267,15 +257,11 @@ ret_result_t readCommand (char ***params, int *nparams)
 				break;
 
 			case IN_COMMENT:
-				if (ch == EOF)
-					return RET_EOFOK;
 				if (ch == '\n')
 					return RET_OK;
 				break;
 
 			case IN_ERROR:
-				if (ch == EOF)
-					return RET_EOFERR;
 				if (ch == '\n')
 					return RET_ERR;
 				break;
@@ -304,7 +290,7 @@ void clearStrings (char ***params, int nparams)
 
 /**
  * Changes environmental variable names prefixed with $ to their values
- * @param params	pointer to a string array
+ * @param params	string array
  * @param nparams	strings count
  * @return			0 on success, 1 on error
  */
@@ -328,10 +314,11 @@ int placeEnv (char **params, int nparams)
 			int start;
 
 			while (posp < len && params[i][posp] != '$')
+			{
 				if (checkStringLen (&s, poss))
 					return 1;
-				else
-					s[poss++] = params[i][posp++];
+				s[poss++] = params[i][posp++];
+			}
 			if (posp == len)
 				break;
 			start = posp + 1;
@@ -355,9 +342,8 @@ int placeEnv (char **params, int nparams)
 			params[i][posp] = ch;
 		}
 
-		if (checkStringLen (&s, poss))
+		if (endString (&s, poss))
 			return 1;
-		s[poss] = '\0';
 		free (params[i]);
 		params[i] = s;
 	}
@@ -365,12 +351,11 @@ int placeEnv (char **params, int nparams)
 }
 
 /**
- * Executes one shell command given in the string array
- * @param command	pointer to a string array
+ * Executes one shell command given in the string array and exits the program
+ * @param command	string array
  * @param nparams	strings count
- * @return		0 on success, 1 on error
  */
-int executeCommand (char **command, int nparams)
+void executeCommand (char **command, int nparams)
 {
 	signal (SIGINT, SIG_DFL);
 
@@ -382,7 +367,7 @@ int executeCommand (char **command, int nparams)
 		char *s = getcwd (NULL, 0);
 		if (s == NULL)
 		{
-			perror ("Error getting current directory ");
+			perror ("Error getting current directory");
 			exit (0);
 		}
 		puts (s);
@@ -394,60 +379,102 @@ int executeCommand (char **command, int nparams)
 		if (nparams == 1)
 		{
 			if (chdir (getenv ("HOME")))
-				perror ("Error changing directory ");
+				perror ("Error changing directory");
 		}
 		else
 			if (chdir (command[1]))
-				perror ("Error changing directory ");
+				perror ("Error changing directory");
 		exit(0);
 	}
 
 	command[nparams] = NULL;
 	execvp (command[0], command);
-	perror ("Error executing command ");
+	perror ("Error executing command");
 	exit (0);
 }
 
+/**
+ * Checks if a string is a io redirector
+ * @param s			string to check
+ * @return			1 if string is a redirector, 0 otherwise
+ */
+int checkString (char *s)
+{
+	return !strcmp (s, ">") || !strcmp (s, "<") || !strcmp (s, "<<") || !strcmp (s, ">>") || !strcmp (s, "|");
+}
 
 /**
- *
- *
+ * Checks if the syntax given in the command is correct (e.g. there is always a parameter for file
+ * input/output redirection)
+ * @param params	string array
+ * @param nparams	string count
+ * @return			0 on correct syntax, 1 on incorrect
  */
 int checkSyntax (char **params, int nparams)
 {
-	if (!strcmp (params[nparams - 1], ">") || !strcmp (params[nparams - 1], "<") || !strcmp (params[nparams - 1], "<<") ||
-	    !strcmp (params[nparams - 1], ">>") || !strcmp (params[nparams - 1], "|"))
-	    return 1;
+	int i;
+
+	if (checkString (params[0]) || checkString (params[nparams - 1]))
+		return 1;
+	for (i = 0; i < nparams - 1; i++)
+		if (checkString (params[i]) && checkString (params[i + 1]))
+			return 1;
+
 	return 0;
 }
 
 /**
- *
- *
+ * Checks if a command given is an internal command, that needs to be executed
+ * in the main process, rather than in fork (), and executes it if needed
+ * @param params	string array
+ * @param n			string to check
+ * @param nparams	string count
+ * @return			-1 on exit, 1 on internal command, 0 on non-internal command
+ */
+int internalCommand (char **params, int n, int nparams)
+{
+	if (!strcmp (params[n], "exit"))
+		return -1;
+	if (!strcmp (params[n], "cd"))
+	{
+		if (n == nparams - 1)
+		{
+			if (chdir (getenv ("HOME")))
+				perror ("Error changing directory");
+		}
+		else
+			if (chdir (params[n + 1]))
+				perror ("Error changing directory");
+		return 1;
+	}
+	return 0;
+}
+
+/**
+ * Executes all the commands in the line, redirects input/output if needed
+ * @param params	string array
+ * @param nparams	string count
+ * @return			1 on exit, 0 otherwise
  */
 int doCommands (char **params, int nparams)
 {
 	pid_t pid;
-	int i = 0, j, conv, cnt, pipes[2][2]={{0}}, fd;
+	int i = 0, j, conv, cnt, pipes[2][2]={{0}}, fd, isinternal;
 	char **command;
 
 	if (checkSyntax (params, nparams))
 	{
-		puts ("Unexpected end of line");
+		puts ("Syntax error");
 		return 0;
 	}
 
 	while (i < nparams)
 	{
-		if (!strcmp (params[i], "exit"))
-			return 1;
-
 		conv = i;
 		cnt = 0;
 		while (++conv < nparams && strcmp (params[conv], "|"));
-		if ((command = calloc (conv - i + 1, sizeof (char *))) == NULL)
-			return 0;
-
+		if ((isinternal = internalCommand (params, i, nparams)) == -1)
+			return 1;
 		if (i > 0)
 		{
 			if (pipes[0][0])
@@ -458,9 +485,18 @@ int doCommands (char **params, int nparams)
 		if (conv < nparams)
 			pipe (pipes[1]);
 
+		if (isinternal == 1)
+		{
+			i = conv + 1;
+			continue;
+		}
+
+		if ((command = calloc (conv - i + 1, sizeof (char *))) == NULL)
+			return 0;
+
 		if ((pid = fork ()) < 0)
 		{
-			perror ("Error creating child process ");
+			perror ("Error creating child process");
 			clearStrings (&command, cnt);
 			return 0;
 		}
@@ -531,31 +567,31 @@ int setEnvVars ()
 
 	if ((len = readlink ("/proc/self/exe", buf, BUF_SIZE - 1)) == -1)
 	{
-		perror ("Error getting program name ");
+		perror ("Error getting program name");
 		return 1;
 	}
 	buf[len] = '\0';
 	if (setenv ("SHELL", buf, 1) == -1)
 	{
-		perror ("Error setting program name ");
+		perror ("Error setting program name");
 		return 1;
 	}
 
 	sprintf (buf, "%d", geteuid ());
 	if (setenv ("EUID", buf, 1) == -1)
 	{
-		perror ("Error setting puid ");
+		perror ("Error setting puid");
 		return 1;
 	}
 
 	if (getlogin_r (buf, BUF_SIZE))
 	{
-		perror ("Error getting user name ");
+		perror ("Error getting user name");
 		return 1;
 	}
 	if (setenv ("USER", buf, 1) == -1)
 	{
-		perror ("Error setting user name ");
+		perror ("Error setting user name");
 		return 1;
 	}
 
@@ -574,7 +610,7 @@ int main ()
 
 	printf (INPUT_STR);
 
-	while ((ret = readCommand (&params, &nparams)) < RET_EOFOK)
+	while ((ret = readCommand (&params, &nparams)) < RET_EOF)
 	{
 		if (ret == RET_ERR)
 			puts ("Wrong format!");
@@ -590,17 +626,10 @@ int main ()
 		clearStrings (&params, nparams);
 	}
 
-	if (ret == RET_EOFOK)
-		doCommands (params, nparams);
-	else if (ret == RET_MEMORYERR)
+	if (ret == RET_MEMORYERR)
 	{
 		putchar ('\n');
 		puts ("Memory allocation error!");
-	}
-	else if (ret == RET_EOFERR)
-	{
-		putchar ('\n');
-		puts ("Wrong format!");
 	}
 	clearStrings (&params, nparams);
 
