@@ -8,12 +8,22 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+#define lololololo
+
 #define STR_SIZE 128
 #define PARAM_COUNT 4
 #define BUF_SIZE 1024
 #define INPUT_STR "$ "
 
 typedef enum { RET_OK, RET_ERR, RET_EOF, RET_MEMORYERR } ret_result_t;
+typedef enum { ST_NONE = 0, ST_RUNNING, ST_DONE } status_t;
+
+typedef struct
+{
+	char *job;
+	int pid;
+	status_t status;
+} job_t;
 
 /**
  * Checks if there is enough allocated space to add another charachter to a string and allocates new
@@ -123,6 +133,95 @@ int addParam (char ***params, int *nparams)
 	}
 
 	return 1;
+}
+
+int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pid)
+{
+	int len = 0, i;
+	job_t *ptr;
+
+	if ((ptr = realloc (*jobs, (*njobs + 1) * sizeof (job_t))) == NULL)
+	{
+		perror ("Memory allocation error!");
+		return 1;
+	}
+	*jobs = ptr;
+	(*jobs)[*njobs].pid = pid;
+	(*jobs)[*njobs].status = ST_RUNNING;
+
+	for (i = 0; i < nparams; i++)
+		len += strlen (command[i]);
+	(*jobs)[*njobs].job = calloc (len + 1, sizeof (char));
+	(*jobs)[*njobs].job[0] = '\0';
+	for (i = 0; i < nparams; i++)
+		strcpy ((*jobs)[*njobs].job + strlen ((*jobs)[*njobs].job), command[i]);
+
+	(*njobs)++;
+	return 0;
+}
+
+int deleteJob (job_t **jobs, int *njobs, int n)
+{
+	int i;
+	job_t *ptr;
+
+	free ((*jobs)[n].job);
+	(*jobs)[n].job = NULL;
+	if (n == *njobs - 1)
+	{
+		i = n;
+		while (((*jobs)[i].status == ST_NONE) && --i > 0);
+		if ((ptr = realloc (*jobs, i * sizeof (job_t))) == NULL && i > 0)
+		{
+			perror ("Memory allocation error!");
+			return 1;
+		}
+		*jobs = ptr;
+		*njobs = i;
+	}
+
+	return 0;
+}
+
+void clearJobs (job_t **jobs, int njobs)
+{
+	int i;
+	if (*jobs == NULL)
+		return;
+
+	for (i = 0; i < njobs; i++)
+		if ((*jobs)[i].job != NULL)
+			free ((*jobs)[i].job);
+	free (*jobs);
+	*jobs = NULL;
+}
+
+void showJobs (job_t *jobs, int njobs)
+{
+	int i;
+	for (i = 0; i < njobs; i++)
+		if (jobs[i].status != ST_NONE)
+			printf ("[%d] Running\t\t%s\n", i + 1, jobs[i].job);
+}
+
+int checkJobs (job_t **jobs, int *njobs)
+{
+	int i;
+	pid_t pid;
+	while ((pid = waitpid (-1, NULL, WNOHANG)) > 0)
+	{
+		for (i = 0; i < *njobs; i++)
+			if ((*jobs)[i].pid == pid)
+			{
+				(*jobs)[i].status = ST_NONE;
+				printf ("[%d] Done\t\t%s\n", i + 1, (*jobs)[i].job);
+				if (deleteJob (jobs, njobs, i))
+					return 1;
+				continue;
+			}
+	}
+
+	return 0;
 }
 
 /**
@@ -355,12 +454,21 @@ int placeEnv (char **params, int nparams)
  * @param command	string array
  * @param nparams	strings count
  */
-void executeCommand (char **command, int nparams)
+void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 {
 	signal (SIGINT, SIG_DFL);
 
 	if (!nparams || command[0][0] == '\0')
 		exit (0);
+
+	if (!strcmp (command[0], "cd") || !strcmp (command[0], "exit"))
+		exit (0);
+
+	if (!strcmp (command[0], "jobs"))
+	{
+		showJobs (jobs, njobs);
+		exit (0);
+	}
 
 	if (!strcmp (command[0], "pwd"))
 	{
@@ -373,18 +481,6 @@ void executeCommand (char **command, int nparams)
 		puts (s);
 		free (s);
 		exit (0);
-	}
-	if (!strcmp (command[0], "cd"))
-	{
-		if (nparams == 1)
-		{
-			if (chdir (getenv ("HOME")))
-				perror ("Error changing directory");
-		}
-		else
-			if (chdir (command[1]))
-				perror ("Error changing directory");
-		exit(0);
 	}
 
 	command[nparams] = NULL;
@@ -400,7 +496,7 @@ void executeCommand (char **command, int nparams)
  */
 int checkString (char *s)
 {
-	return !strcmp (s, ">") || !strcmp (s, "<") || !strcmp (s, "<<") || !strcmp (s, ">>") || !strcmp (s, "|");
+	return !strcmp (s, ">") || !strcmp (s, "<") || !strcmp (s, "<<") || !strcmp (s, ">>") || !strcmp (s, "|") || !strcmp (s, "&");
 }
 
 /**
@@ -423,29 +519,39 @@ int checkSyntax (char **params, int nparams)
 	return 0;
 }
 
+int isInternal (char **command, int nparams)
+{
+	int i;
+
+	if (strcmp (command[0], "cd") && strcmp (command[0], "exit"))
+		return 0;
+	for (i = 1; i < nparams; i++)
+		if (!strcmp (command[i], "|"))
+			return 0;
+	return 1;
+}
+
 /**
  * Checks if a command given is an internal command, that needs to be executed
  * in the main process, rather than in fork (), and executes it if needed
- * @param params	string array
- * @param n			string to check
+ * @param command	string array
  * @param nparams	string count
- * @return			-1 on exit, 1 on internal command, 0 on non-internal command
+ * @return			1 on exit, 0 on non-exit
  */
-int internalCommand (char **params, int n, int nparams)
+int internalCommand (char **command, int nparams)
 {
-	if (!strcmp (params[n], "exit"))
-		return -1;
-	if (!strcmp (params[n], "cd"))
+	if (!strcmp (command[0], "exit"))
+		return 1;
+	if (!strcmp (command[0], "cd"))
 	{
-		if (n == nparams - 1)
+		if (nparams == 1)
 		{
 			if (chdir (getenv ("HOME")))
 				perror ("Error changing directory");
 		}
 		else
-			if (chdir (params[n + 1]))
+			if (chdir (command[1]))
 				perror ("Error changing directory");
-		return 1;
 	}
 	return 0;
 }
@@ -456,10 +562,10 @@ int internalCommand (char **params, int n, int nparams)
  * @param nparams	string count
  * @return			1 on exit, 0 otherwise
  */
-int doCommands (char **params, int nparams)
+int doCommands (char **params, int nparams, job_t **jobs, int *njobs)
 {
 	pid_t pid;
-	int i = 0, j, conv, cnt, pipes[2][2]={{0}}, fd, isinternal;
+	int i = 0, j, conv, cnt, pipes[2][2]={{0}}, fd;
 	char **command;
 
 	if (checkSyntax (params, nparams))
@@ -473,8 +579,6 @@ int doCommands (char **params, int nparams)
 		conv = i;
 		cnt = 0;
 		while (++conv < nparams && strcmp (params[conv], "|"));
-		if ((isinternal = internalCommand (params, i, nparams)) == -1)
-			return 1;
 		if (i > 0)
 		{
 			if (pipes[0][0])
@@ -484,12 +588,6 @@ int doCommands (char **params, int nparams)
 		}
 		if (conv < nparams)
 			pipe (pipes[1]);
-
-		if (isinternal == 1)
-		{
-			i = conv + 1;
-			continue;
-		}
 
 		if ((command = calloc (conv - i + 1, sizeof (char *))) == NULL)
 			return 0;
@@ -543,15 +641,52 @@ int doCommands (char **params, int nparams)
 				}
 
 			command[cnt] = NULL;
-			executeCommand (command, cnt);
+			executeCommand (command, cnt, *jobs, *njobs);
 		}
 		clearStrings (&command, cnt);
 		i = conv + 1;
 	}
 
-	waitpid (pid, NULL, 0);
 	if (pipes[0][0])
 		close (pipes[0][0]);
+
+	return 0;
+}
+
+int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
+{
+	int i = 0, j, pid;
+	while (i < nparams)
+	{
+		j = i;
+		while (++j < nparams && strcmp (params[j], "&"));
+
+		if (j == nparams && isInternal (params + i, j - i))
+		{
+			if (internalCommand (params + i, j - 1))
+				return 1;
+			return 0;
+		}
+
+		if ((pid = fork ()) < 0)
+		{
+			perror ("Error creating child process");
+			return 0;
+		}
+		else if (!pid)
+		{
+			doCommands (params + i, j - i, jobs, njobs);
+			while (wait (NULL) != -1);
+			exit (0);
+		}
+
+		if (j == nparams)
+			waitpid (pid, NULL, 0);
+		else
+			if (addJob (jobs, njobs, params + i, j - i, pid))
+				return 0;
+		i = j + 1;
+	}
 
 	return 0;
 }
@@ -600,8 +735,9 @@ int setEnvVars ()
 
 int main ()
 {
-	int nparams;
+	int nparams, njobs = 0;
 	char **params = NULL;
+	job_t *jobs = NULL;
 	ret_result_t ret;
 
 	signal (SIGINT, SIG_IGN);
@@ -618,12 +754,14 @@ int main ()
 		{
 			if (placeEnv (params, nparams))
 				continue;
-			if (doCommands (params, nparams))
+			if (doJobs (params, nparams, &jobs, &njobs))
 				break;
 		}
 
-		printf (INPUT_STR);
 		clearStrings (&params, nparams);
+		if (checkJobs (&jobs, &njobs))
+			break;
+		printf (INPUT_STR);
 	}
 
 	if (ret == RET_MEMORYERR)
@@ -631,7 +769,9 @@ int main ()
 		putchar ('\n');
 		puts ("Memory allocation error!");
 	}
+
 	clearStrings (&params, nparams);
+	clearJobs (&jobs, njobs);
 
 	return 0;
 }
