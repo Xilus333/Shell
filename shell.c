@@ -8,16 +8,13 @@
 #include <stdlib.h>
 #include <ctype.h>
 
-#define lololololo
-
 #define STR_SIZE 128
 #define PARAM_COUNT 4
 #define BUF_SIZE 1024
 #define INPUT_STR "$ "
 
 typedef enum { RET_OK, RET_ERR, RET_EOF, RET_MEMORYERR } ret_result_t;
-typedef enum { ST_NONE = 0, ST_RUNNING, ST_DONE } status_t;
-
+typedef enum { ST_NONE = 0, ST_RUNNING, ST_DONE, ST_STOPPED } status_t;
 typedef struct
 {
 	char *job;
@@ -137,7 +134,7 @@ int addParam (char ***params, int *nparams)
 
 int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pid)
 {
-	int len = 0, i;
+	int len = nparams + 1, i;
 	job_t *ptr;
 
 	if ((ptr = realloc (*jobs, (*njobs + 1) * sizeof (job_t))) == NULL)
@@ -154,8 +151,13 @@ int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pid)
 	(*jobs)[*njobs].job = calloc (len + 1, sizeof (char));
 	(*jobs)[*njobs].job[0] = '\0';
 	for (i = 0; i < nparams; i++)
-		strcpy ((*jobs)[*njobs].job + strlen ((*jobs)[*njobs].job), command[i]);
+	{
+		len = strlen ((*jobs)[*njobs].job);
+		(*jobs)[*njobs].job[len] = ' ';
+		strcpy ((*jobs)[*njobs].job + len + 1, command[i]);
+	}
 
+	printf ("[%d] Running\t\t%s\n", *njobs + 1, (*jobs)[*njobs].job);
 	(*njobs)++;
 	return 0;
 }
@@ -167,17 +169,18 @@ int deleteJob (job_t **jobs, int *njobs, int n)
 
 	free ((*jobs)[n].job);
 	(*jobs)[n].job = NULL;
+	(*jobs)[n].status = ST_NONE;
 	if (n == *njobs - 1)
 	{
 		i = n;
-		while (((*jobs)[i].status == ST_NONE) && --i > 0);
-		if ((ptr = realloc (*jobs, i * sizeof (job_t))) == NULL && i > 0)
+		while (((*jobs)[i].status == ST_NONE) && --i >= 0);
+		if ((ptr = realloc (*jobs, (i + 1) * sizeof (job_t))) == NULL && i + 1 > 0)
 		{
 			perror ("Memory allocation error!");
 			return 1;
 		}
 		*jobs = ptr;
-		*njobs = i;
+		*njobs = i + 1;
 	}
 
 	return 0;
@@ -196,15 +199,26 @@ void clearJobs (job_t **jobs, int njobs)
 	*jobs = NULL;
 }
 
-void showJobs (job_t *jobs, int njobs)
+void showJobs (job_t *jobs, int njobs, int doneonly)
 {
 	int i;
+	char status[10];
 	for (i = 0; i < njobs; i++)
 		if (jobs[i].status != ST_NONE)
-			printf ("[%d] Running\t\t%s\n", i + 1, jobs[i].job);
+		{
+			switch (jobs[i].status)
+			{
+				case ST_NONE: break;
+				case ST_DONE: strcpy (status, "Done"); break;
+				case ST_RUNNING: strcpy (status, "Running"); break;
+				case ST_STOPPED: strcpy (status, "Stopped"); break;
+			}
+			if ((doneonly && jobs[i].status == ST_DONE) || (!doneonly && jobs[i].status != ST_NONE))
+				printf ("[%d] %s\t\t%s\n", i + 1, status, jobs[i].job);
+		}
 }
 
-int checkJobs (job_t **jobs, int *njobs)
+int checkJobs (job_t **jobs, int *njobs, int doneonly)
 {
 	int i;
 	pid_t pid;
@@ -213,14 +227,17 @@ int checkJobs (job_t **jobs, int *njobs)
 		for (i = 0; i < *njobs; i++)
 			if ((*jobs)[i].pid == pid)
 			{
-				(*jobs)[i].status = ST_NONE;
-				printf ("[%d] Done\t\t%s\n", i + 1, (*jobs)[i].job);
-				if (deleteJob (jobs, njobs, i))
-					return 1;
-				continue;
+				(*jobs)[i].status = ST_DONE;
+				break;
 			}
 	}
-
+	showJobs (*jobs, *njobs, doneonly);
+	for (i = 0; i < *njobs; i++)
+		if ((*jobs)[i].status == ST_DONE)
+		{
+			if (deleteJob (jobs, njobs, i))
+				return 1;
+		}
 	return 0;
 }
 
@@ -456,8 +473,6 @@ int placeEnv (char **params, int nparams)
  */
 void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 {
-	signal (SIGINT, SIG_DFL);
-
 	if (!nparams || command[0][0] == '\0')
 		exit (0);
 
@@ -466,7 +481,7 @@ void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 
 	if (!strcmp (command[0], "jobs"))
 	{
-		showJobs (jobs, njobs);
+		showJobs (jobs, njobs, 0);
 		exit (0);
 	}
 
@@ -515,7 +530,6 @@ int checkSyntax (char **params, int nparams)
 	for (i = 0; i < nparams - 1; i++)
 		if (checkString (params[i]) && checkString (params[i + 1]))
 			return 1;
-
 	return 0;
 }
 
@@ -523,7 +537,7 @@ int isInternal (char **command, int nparams)
 {
 	int i;
 
-	if (strcmp (command[0], "cd") && strcmp (command[0], "exit"))
+	if (strcmp (command[0], "cd") && strcmp (command[0], "exit") && strcmp (command[0], "jobs"))
 		return 0;
 	for (i = 1; i < nparams; i++)
 		if (!strcmp (command[i], "|"))
@@ -538,11 +552,11 @@ int isInternal (char **command, int nparams)
  * @param nparams	string count
  * @return			1 on exit, 0 on non-exit
  */
-int internalCommand (char **command, int nparams)
+int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 {
 	if (!strcmp (command[0], "exit"))
 		return 1;
-	if (!strcmp (command[0], "cd"))
+	else if (!strcmp (command[0], "cd"))
 	{
 		if (nparams == 1)
 		{
@@ -553,6 +567,8 @@ int internalCommand (char **command, int nparams)
 			if (chdir (command[1]))
 				perror ("Error changing directory");
 	}
+	else if (!strcmp (command[0], "jobs"))
+		checkJobs (jobs, njobs, 0);
 	return 0;
 }
 
@@ -562,7 +578,7 @@ int internalCommand (char **command, int nparams)
  * @param nparams	string count
  * @return			1 on exit, 0 otherwise
  */
-int doCommands (char **params, int nparams, job_t **jobs, int *njobs)
+int doCommands (char **params, int nparams, job_t *jobs, int njobs)
 {
 	pid_t pid;
 	int i = 0, j, conv, cnt, pipes[2][2]={{0}}, fd;
@@ -641,7 +657,7 @@ int doCommands (char **params, int nparams, job_t **jobs, int *njobs)
 				}
 
 			command[cnt] = NULL;
-			executeCommand (command, cnt, *jobs, *njobs);
+			executeCommand (command, cnt, jobs, njobs);
 		}
 		clearStrings (&command, cnt);
 		i = conv + 1;
@@ -663,7 +679,7 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
 
 		if (j == nparams && isInternal (params + i, j - i))
 		{
-			if (internalCommand (params + i, j - 1))
+			if (internalCommand (params + i, j - 1, jobs, njobs))
 				return 1;
 			return 0;
 		}
@@ -675,7 +691,9 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
 		}
 		else if (!pid)
 		{
-			doCommands (params + i, j - i, jobs, njobs);
+			if (j == nparams)
+				signal (SIGINT, SIG_DFL);
+			doCommands (params + i, j - i, *jobs, *njobs);
 			while (wait (NULL) != -1);
 			exit (0);
 		}
@@ -759,7 +777,7 @@ int main ()
 		}
 
 		clearStrings (&params, nparams);
-		if (checkJobs (&jobs, &njobs))
+		if (checkJobs (&jobs, &njobs, 1))
 			break;
 		printf (INPUT_STR);
 	}
