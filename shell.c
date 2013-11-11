@@ -15,6 +15,7 @@
 
 typedef enum { RET_OK, RET_ERR, RET_EOF, RET_MEMORYERR } ret_result_t;
 typedef enum { ST_NONE = 0, ST_RUNNING, ST_DONE, ST_STOPPED } status_t;
+
 typedef struct
 {
 	char *job;
@@ -476,7 +477,7 @@ void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 	if (!nparams || command[0][0] == '\0')
 		exit (0);
 
-	if (!strcmp (command[0], "cd") || !strcmp (command[0], "exit"))
+	if (!strcmp (command[0], "cd") || !strcmp (command[0], "exit") || !strcmp (command[0], "fg"))
 		exit (0);
 
 	if (!strcmp (command[0], "jobs"))
@@ -537,7 +538,7 @@ int isInternal (char **command, int nparams)
 {
 	int i;
 
-	if (strcmp (command[0], "cd") && strcmp (command[0], "exit") && strcmp (command[0], "jobs"))
+	if (strcmp (command[0], "cd") && strcmp (command[0], "exit") && strcmp (command[0], "jobs") && strcmp (command[0], "fg"))
 		return 0;
 	for (i = 1; i < nparams; i++)
 		if (!strcmp (command[i], "|"))
@@ -569,6 +570,24 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 	}
 	else if (!strcmp (command[0], "jobs"))
 		checkJobs (jobs, njobs, 0);
+	else if (!strcmp (command[0], "fg"))
+	{
+		int n, pid;
+		if (nparams == 1)
+			n = *njobs - 1;
+		else
+			n = atoi (command[1]) - 1;
+		if (n < 0 || n >= *njobs)
+		{
+			puts ("No such job!");
+			return 0;
+		}
+		pid = (*jobs)[n].pid;
+		deleteJob (jobs, njobs, n);
+		kill (pid, SIGCONT);
+		//kill (pid, SIGUSR1); ???????????????????
+		waitpid (pid, NULL, 0);
+	}
 	return 0;
 }
 
@@ -576,9 +595,9 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
  * Executes all the commands in the line, redirects input/output if needed
  * @param params	string array
  * @param nparams	string count
- * @return			1 on exit, 0 otherwise
+ * @return			last child pid
  */
-int doCommands (char **params, int nparams, job_t *jobs, int njobs)
+pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 {
 	pid_t pid;
 	int i = 0, j, conv, cnt, pipes[2][2]={{0}}, fd;
@@ -666,7 +685,7 @@ int doCommands (char **params, int nparams, job_t *jobs, int njobs)
 	if (pipes[0][0])
 		close (pipes[0][0]);
 
-	return 0;
+	return pid;
 }
 
 int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
@@ -679,7 +698,7 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
 
 		if (j == nparams && isInternal (params + i, j - i))
 		{
-			if (internalCommand (params + i, j - 1, jobs, njobs))
+			if (internalCommand (params + i, j - i, jobs, njobs))
 				return 1;
 			return 0;
 		}
@@ -691,9 +710,11 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
 		}
 		else if (!pid)
 		{
+			int chpid;
 			if (j == nparams)
 				signal (SIGINT, SIG_DFL);
-			doCommands (params + i, j - i, *jobs, *njobs);
+			chpid = doCommands (params + i, j - i, *jobs, *njobs);
+			// Change children SIGINT handler if SIGUSR1 ??????????
 			while (wait (NULL) != -1);
 			exit (0);
 		}
@@ -701,8 +722,13 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
 		if (j == nparams)
 			waitpid (pid, NULL, 0);
 		else
+		{
+			if (0)
+				// Stop, if it needs user input ????????????????
+				kill (pid, SIGSTOP);
 			if (addJob (jobs, njobs, params + i, j - i, pid))
 				return 0;
+		}
 		i = j + 1;
 	}
 
@@ -757,6 +783,8 @@ int main ()
 	char **params = NULL;
 	job_t *jobs = NULL;
 	ret_result_t ret;
+
+	//freopen ("input.txt", "r", stdin);
 
 	signal (SIGINT, SIG_IGN);
 	if (setEnvVars ())
