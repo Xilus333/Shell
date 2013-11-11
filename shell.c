@@ -14,12 +14,12 @@
 #define INPUT_STR "$ "
 
 typedef enum { RET_OK, RET_ERR, RET_EOF, RET_MEMORYERR } ret_result_t;
-typedef enum { ST_NONE = 0, ST_RUNNING, ST_DONE, ST_STOPPED } status_t;
+typedef enum { ST_NONE, ST_RUNNING, ST_DONE, ST_STOPPED, ST_JUSTSTP } status_t;
 
 typedef struct
 {
 	char *job;
-	int pid;
+	int pgid;
 	status_t status;
 } job_t;
 
@@ -133,23 +133,23 @@ int addParam (char ***params, int *nparams)
 	return 1;
 }
 
-int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pid)
+int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid)
 {
 	int len = nparams + 1, i;
 	job_t *ptr;
 
 	if ((ptr = realloc (*jobs, (*njobs + 1) * sizeof (job_t))) == NULL)
-	{
-		perror ("Memory allocation error!");
 		return 1;
-	}
+
 	*jobs = ptr;
-	(*jobs)[*njobs].pid = pid;
+	(*jobs)[*njobs].pgid = pgid;
 	(*jobs)[*njobs].status = ST_RUNNING;
 
 	for (i = 0; i < nparams; i++)
 		len += strlen (command[i]);
-	(*jobs)[*njobs].job = calloc (len + 1, sizeof (char));
+	if (((*jobs)[*njobs].job = calloc (len + 1, sizeof (char))) == NULL)
+		return 1;
+
 	(*jobs)[*njobs].job[0] = '\0';
 	for (i = 0; i < nparams; i++)
 	{
@@ -158,12 +158,12 @@ int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pid)
 		strcpy ((*jobs)[*njobs].job + len + 1, command[i]);
 	}
 
-	printf ("[%d] Running\t\t%s\n", *njobs + 1, (*jobs)[*njobs].job);
+	printf ("[%d] %d\n", *njobs + 1, (*jobs)[*njobs].pgid);
 	(*njobs)++;
 	return 0;
 }
 
-int deleteJob (job_t **jobs, int *njobs, int n)
+int deleteJob (job_t **jobs, int *njobs, int n) /* CHECK RETURN!!!!!!!!! */
 {
 	int i;
 	job_t *ptr;
@@ -176,10 +176,7 @@ int deleteJob (job_t **jobs, int *njobs, int n)
 		i = n;
 		while (((*jobs)[i].status == ST_NONE) && --i >= 0);
 		if ((ptr = realloc (*jobs, (i + 1) * sizeof (job_t))) == NULL && i + 1 > 0)
-		{
-			perror ("Memory allocation error!");
 			return 1;
-		}
 		*jobs = ptr;
 		*njobs = i + 1;
 	}
@@ -200,39 +197,43 @@ void clearJobs (job_t **jobs, int njobs)
 	*jobs = NULL;
 }
 
-void showJobs (job_t *jobs, int njobs, int doneonly)
+void showJobs (job_t *jobs, int njobs, int fullog)
 {
 	int i;
 	char status[10];
 	for (i = 0; i < njobs; i++)
 		if (jobs[i].status != ST_NONE)
 		{
+			if (!fullog && (jobs[i].status == ST_DONE || jobs[i].status == ST_STOPPED))
+			    continue;
 			switch (jobs[i].status)
 			{
-				case ST_NONE: break;
-				case ST_DONE: strcpy (status, "Done"); break;
+				case ST_NONE:	 break;
+				case ST_DONE: 	 strcpy (status, "Done");	 break;
 				case ST_RUNNING: strcpy (status, "Running"); break;
+				case ST_JUSTSTP:
 				case ST_STOPPED: strcpy (status, "Stopped"); break;
 			}
-			if ((doneonly && jobs[i].status == ST_DONE) || (!doneonly && jobs[i].status != ST_NONE))
-				printf ("[%d] %s\t\t%s\n", i + 1, status, jobs[i].job);
+			printf ("[%d] %s\t\t%s\n", i + 1, status, jobs[i].job);
+			if (jobs[i].status == ST_JUSTSTP)
+				jobs[i].status = ST_STOPPED;
 		}
 }
 
-int checkJobs (job_t **jobs, int *njobs, int doneonly)
+int checkJobs (job_t **jobs, int *njobs, int fullog) /* CHEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEECK*/
 {
-	int i;
-	pid_t pid;
-	while ((pid = waitpid (-1, NULL, WNOHANG)) > 0)
+	int i, status;
+	pid_t pgid;
+	while ((pgid = waitpid (-1, &status, WNOHANG)) > 0)
 	{
 		for (i = 0; i < *njobs; i++)
-			if ((*jobs)[i].pid == pid)
+			if ((*jobs)[i].pgid == pgid)
 			{
 				(*jobs)[i].status = ST_DONE;
 				break;
 			}
 	}
-	showJobs (*jobs, *njobs, doneonly);
+	showJobs (*jobs, *njobs, fullog);
 	for (i = 0; i < *njobs; i++)
 		if ((*jobs)[i].status == ST_DONE)
 		{
@@ -265,7 +266,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 	{
 		ch = getchar ();
 		if (ch == EOF && state != IN_INITIAL)
-			return RET_EOF;
+			continue;
 		switch (state)
 		{
 			case IN_INITIAL:
@@ -468,12 +469,15 @@ int placeEnv (char **params, int nparams)
 }
 
 /**
- * Executes one shell command given in the string array and exits the program
+ * Executes one shell command given in the string array and exits
  * @param command	string array
  * @param nparams	strings count
  */
 void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 {
+	signal (SIGINT, SIG_DFL);
+	signal (SIGTTOU, SIG_DFL);
+
 	if (!nparams || command[0][0] == '\0')
 		exit (0);
 
@@ -501,7 +505,7 @@ void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 
 	command[nparams] = NULL;
 	execvp (command[0], command);
-	perror ("Error executing command");
+	perror (command[0]);
 	exit (0);
 }
 
@@ -569,10 +573,10 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 				perror ("Error changing directory");
 	}
 	else if (!strcmp (command[0], "jobs"))
-		checkJobs (jobs, njobs, 0);
+		checkJobs (jobs, njobs, 1);
 	else if (!strcmp (command[0], "fg"))
 	{
-		int n, pid;
+		int n, pgid;
 		if (nparams == 1)
 			n = *njobs - 1;
 		else
@@ -582,11 +586,12 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 			puts ("No such job!");
 			return 0;
 		}
-		pid = (*jobs)[n].pid;
+		pgid = (*jobs)[n].pgid;
 		deleteJob (jobs, njobs, n);
-		kill (pid, SIGCONT);
-		//kill (pid, SIGUSR1); ???????????????????
-		waitpid (pid, NULL, 0);
+		tcsetpgrp (STDIN_FILENO, pgid);
+		kill (pgid, SIGCONT);
+		while (waitpid (-pgid, NULL, 0) != -1);
+		tcsetpgrp (STDIN_FILENO, getpid ());
 	}
 	return 0;
 }
@@ -599,13 +604,13 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
  */
 pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 {
-	pid_t pid;
+	pid_t pid, pgid;
 	int i = 0, j, conv, cnt, pipes[2][2]={{0}}, fd;
 	char **command;
 
 	if (checkSyntax (params, nparams))
 	{
-		puts ("Syntax error");
+		puts ("Syntax error!s");
 		return 0;
 	}
 
@@ -633,7 +638,11 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 			clearStrings (&command, cnt);
 			return 0;
 		}
-		else if (!pid)
+
+		if (i == 0) /* If it is was first fork */
+			pgid = pid;
+
+		if (!pid)
 		{
 			if (i > 0)
 			{
@@ -676,6 +685,7 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 				}
 
 			command[cnt] = NULL;
+			setpgid (0, pgid);
 			executeCommand (command, cnt, jobs, njobs);
 		}
 		clearStrings (&command, cnt);
@@ -685,12 +695,13 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 	if (pipes[0][0])
 		close (pipes[0][0]);
 
-	return pid;
+	return pgid;
 }
 
 int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
 {
-	int i = 0, j, pid;
+	int i = 0, j;
+	pid_t pgid;
 	while (i < nparams)
 	{
 		j = i;
@@ -703,32 +714,16 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
 			return 0;
 		}
 
-		if ((pid = fork ()) < 0)
+		pgid = doCommands (params + i, j - i, *jobs, *njobs);
+		if (j == nparams)  /* If it is a foreground command */
 		{
-			perror ("Error creating child process");
-			return 0;
+			tcsetpgrp (STDIN_FILENO, pgid);
+			while (waitpid (-pgid, NULL, 0) != -1);
+			tcsetpgrp (STDIN_FILENO, getpid ());
 		}
-		else if (!pid)
-		{
-			int chpid;
-			if (j == nparams)
-				signal (SIGINT, SIG_DFL);
-			chpid = doCommands (params + i, j - i, *jobs, *njobs);
-			// Change children SIGINT handler if SIGUSR1 ??????????
-			while (wait (NULL) != -1);
-			exit (0);
-		}
-
-		if (j == nparams)
-			waitpid (pid, NULL, 0);
-		else
-		{
-			if (0)
-				// Stop, if it needs user input ????????????????
-				kill (pid, SIGSTOP);
-			if (addJob (jobs, njobs, params + i, j - i, pid))
+		else  			   /* If it is a background command */
+			if (addJob (jobs, njobs, params + i, j - i, pgid))
 				return 0;
-		}
 		i = j + 1;
 	}
 
@@ -784,9 +779,9 @@ int main ()
 	job_t *jobs = NULL;
 	ret_result_t ret;
 
-	//freopen ("input.txt", "r", stdin);
-
 	signal (SIGINT, SIG_IGN);
+	signal (SIGTTOU, SIG_IGN);
+
 	if (setEnvVars ())
 		return 1;
 
@@ -805,8 +800,11 @@ int main ()
 		}
 
 		clearStrings (&params, nparams);
-		if (checkJobs (&jobs, &njobs, 1))
+		if (checkJobs (&jobs, &njobs, 0))
+		{
+			ret = RET_MEMORYERR;
 			break;
+		}
 		printf (INPUT_STR);
 	}
 
