@@ -13,6 +13,12 @@
 #define BUF_SIZE 1024
 #define INPUT_STR "$ "
 
+/* Todo:
+ * -New line after CTR-C, need to add general child's return status checker
+ * -Check if jobs operations are successfull
+ * -Commands and redirectors written together
+*/
+
 typedef enum { RET_OK, RET_ERR, RET_EOF, RET_MEMORYERR } ret_result_t;
 typedef enum { ST_NONE, ST_RUNNING, ST_DONE, ST_STOPPED, ST_JUSTSTP } status_t;
 
@@ -26,7 +32,7 @@ typedef struct
 /**
  * Checks if there is enough allocated space to add another charachter to a string and allocates new
  * memory if necessary
- * @param str 	pointer to a string to check
+ * @param str 	pointer to a string
  * @param len 	new string length
  * @return		0 on success, 1 on error
  */
@@ -34,16 +40,13 @@ int checkStringLen (char **str, int len)
 {
 	char *ptr;
 
-	if (len % STR_SIZE)
+	if (len % STR_SIZE > 0)
 		return 0;
+	if ((ptr = realloc (*str, (len + STR_SIZE) * sizeof (char))) == NULL)
+		return 1;
 
-	if ((ptr = realloc (*str, (len + STR_SIZE) * sizeof (char))) != NULL)
-	{
-		*str = ptr;
-		return 0;
-	}
-
-	return 1;
+	*str = ptr;
+	return 0;
 }
 
 /**
@@ -57,16 +60,13 @@ int checkParamCnt (char ***params, int nparams)
 {
 	char **ptr;
 
-	if (nparams % PARAM_COUNT)
+	if (nparams % PARAM_COUNT > 0)
 		return 0;
+	if ((ptr = realloc (*params, (nparams + PARAM_COUNT) * sizeof (char *))) == NULL)
+		return 1;
 
-	if ((ptr = realloc (*params, (nparams + PARAM_COUNT) * sizeof (char *))) != NULL)
-	{
-		*params = ptr;
-		return 0;
-	}
-
-	return 1;
+	*params = ptr;
+	return 0;
 }
 
 /**
@@ -79,24 +79,19 @@ int endString (char **str, int len)
 {
 	char *ptr;
 
-	if (len % STR_SIZE != 0)
+	if (len % STR_SIZE == 0)
 	{
-		(*str)[len] = '\0';
-		return 0;
-	}
-
-	if ((ptr = realloc (*str, (len + 1) * sizeof (char))) != NULL)
-	{
+		if ((ptr = realloc (*str, (len + 1) * sizeof (char))) == NULL)
+			return 1;
 		*str = ptr;
-		(*str)[len] = '\0';
-		return 0;
 	}
 
-	return 1;
+	(*str)[len] = '\0';
+	return 0;
 }
 
 /**
- * Adds character to a string and allocates new memory if necessary
+ * Adds character to a string, allocates new memory if necessary and increases len by 1
  * @param str	pointer to a string
  * @param len	pointer to a current string length
  * @param ch	character to add
@@ -106,15 +101,13 @@ int addChar (char **str, int *len, char ch)
 {
 	if (checkStringLen (str, *len))
 		return 1;
-
-	(*str)[*len] = ch;
-	(*len)++;
+	(*str)[(*len)++] = ch;
 
 	return 0;
 }
 
 /**
- * Adds string to a string array and allocates new memory if necessary
+ * Adds string to a string array, allocates new memory if necessary and increases nparams by 1
  * @param params	pointer to a string array
  * @param nparams	pointer to a current parameters count
  * @return			0 on success, 1 on error
@@ -124,45 +117,41 @@ int addParam (char ***params, int *nparams)
 	if (*nparams)
 		if (checkParamCnt (params, *nparams + 1))
 			return 1;
-	if (((*params)[*nparams] = calloc (STR_SIZE, sizeof (char))) != NULL)
-	{
-		(*nparams)++;
-		return 0;
-	}
+	if (((*params)[(*nparams)++] = calloc (STR_SIZE, sizeof (char))) == NULL)
+		return 1;
 
-	return 1;
+	return 0;
 }
 
 int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid, status_t status)
 {
 	int len = nparams + 1, i;
 	job_t *ptr;
-	char *s;
 
 	if ((ptr = realloc (*jobs, (*njobs + 1) * sizeof (job_t))) == NULL)
 		return 1;
 
 	*jobs = ptr;
-	(*jobs)[*njobs].pgid = pgid;
-	(*jobs)[*njobs].status = status;
+	ptr = *jobs + *njobs;
+	ptr->pgid = pgid;
+	ptr->status = status;
 
-	for (i = 0; i < nparams; i++)
+	for (i = 0; i < nparams; ++i)
 		len += strlen (command[i]);
-	if (((*jobs)[*njobs].job = calloc (len + 1, sizeof (char))) == NULL)
+	if ((ptr->job = calloc (len + 1, sizeof (char))) == NULL)
 		return 1;
 
-	s = (*jobs)[*njobs].job;
 	len = 0;
-	for (i = 0; i < nparams; i++)
+	for (i = 0; i < nparams; ++i)
 	{
-		strcpy (s + len, command[i]);
-		len = strlen (s);
-		s[len] = ' ';
-		s[++len] = '\0';
+		strcpy (ptr->job + len, command[i]);
+		len = strlen (ptr->job);
+		ptr->job[len] = ' ';
+		ptr->job[++len] = '\0';
 	}
 
 	if (status == ST_RUNNING)
-		printf ("[%d] %d\n", *njobs + 1, (*jobs)[*njobs].pgid);
+		printf ("[%d] %d\n", *njobs + 1, ptr->pgid);
 	++(*njobs);
 	return 0;
 }
@@ -194,7 +183,7 @@ void clearJobs (job_t **jobs, int njobs)
 
 	if (*jobs == NULL)
 		return;
-	for (i = 0; i < njobs; i++)
+	for (i = 0; i < njobs; ++i)
 		if ((*jobs)[i].job != NULL)
 			free ((*jobs)[i].job);
 	free (*jobs);
@@ -204,9 +193,9 @@ void clearJobs (job_t **jobs, int njobs)
 void showJobs (job_t *jobs, int njobs, int fullog)
 {
 	int i;
-	char status[10];
+	char status[8];
 
-	for (i = 0; i < njobs; i++)
+	for (i = 0; i < njobs; ++i)
 	{
 		if (jobs[i].status == ST_NONE || (!fullog && (jobs[i].status == ST_RUNNING || jobs[i].status == ST_STOPPED)))
 		    continue;
@@ -215,40 +204,41 @@ void showJobs (job_t *jobs, int njobs, int fullog)
 			case ST_NONE:	 break;
 			case ST_DONE: 	 strcpy (status, "Done");	 break;
 			case ST_RUNNING: strcpy (status, "Running"); break;
-			case ST_JUSTSTP:
+			case ST_JUSTSTP: jobs[i].status = ST_STOPPED;
 			case ST_STOPPED: strcpy (status, "Stopped"); break;
 		}
 		printf ("[%d] %s\t\t%s\n", i + 1, status, jobs[i].job);
-		if (jobs[i].status == ST_JUSTSTP)
-			jobs[i].status = ST_STOPPED;
 	}
 }
 
 int checkJobs (job_t **jobs, int *njobs, int fullog)
 {
 	int i, status;
-	pid_t pid, pgid;
-	for (i = 0; i < *njobs; i++)
+	pid_t pid;
+	job_t *job;
+
+	for (i = 0; i < *njobs; ++i)
 	{
-		if ((*jobs)[i].status == ST_NONE)
+		job = *jobs + i;
+		if (job->status == ST_NONE)
 			continue;
-		pgid = (*jobs)[i].pgid;
-		while ((pid = waitpid (-pgid, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0)
-			if ((*jobs)[i].pgid == pid)
+		while ((pid = waitpid (-job->pgid, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0)
+			if (job->pgid == pid)
 			{
 				if (WIFSTOPPED (status))
-					(*jobs)[i].status = ST_JUSTSTP;
+					job->status = ST_JUSTSTP;
 				else if (WIFCONTINUED (status))
-					(*jobs)[i].status = ST_RUNNING;
+					job->status = ST_RUNNING;
 				else
-					(*jobs)[i].status = ST_DONE;
+					job->status = ST_DONE;
 			}
 	}
 	showJobs (*jobs, *njobs, fullog);
-	for (i = 0; i < *njobs; i++)
+	for (i = 0; i < *njobs; ++i)
 		if ((*jobs)[i].status == ST_DONE)
 			if (deleteJob (jobs, njobs, i))
 				return 1;
+
 	return 0;
 }
 
@@ -407,8 +397,7 @@ void clearStrings (char ***params, int nparams)
 
 	if (params == NULL)
 		return;
-
-	for (i = 0; i < nparams; i++)
+	for (i = 0; i < nparams; ++i)
 		free ((*params)[i]);
 	free (*params);
 
@@ -424,14 +413,13 @@ void clearStrings (char ***params, int nparams)
 int placeEnv (char **params, int nparams)
 {
 	int i;
-	for (i = 0; i < nparams; i++)
+	for (i = 0; i < nparams; ++i)
 	{
 		int len = strlen (params[i]), posp = 0, poss = 0, ch;
 		char *s;
 
 		if (len < 2 || !strchr (params[i], '$'))
 			continue;
-
 		if ((s = calloc (STR_SIZE, sizeof (char))) == NULL)
 			return 1;
 
@@ -490,16 +478,13 @@ void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 
 	if (!nparams || command[0][0] == '\0')
 		exit (0);
-
 	if (!strcmp (command[0], "cd") || !strcmp (command[0], "exit") || !strcmp (command[0], "fg") || !strcmp (command[0], "bg"))
 		exit (0);
-
 	if (!strcmp (command[0], "jobs"))
 	{
 		showJobs (jobs, njobs, 1);
 		exit (0);
 	}
-
 	if (!strcmp (command[0], "pwd"))
 	{
 		char *s = getcwd (NULL, 0);
@@ -516,17 +501,21 @@ void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 	command[nparams] = NULL;
 	execvp (command[0], command);
 	perror (command[0]);
-	exit (0);
+	exit (1);
 }
 
 /**
- * Checks if a string is a io redirector
+ * Checks if a string is a special character
  * @param s			string to check
- * @return			1 if string is a redirector, 0 otherwise
+ * @return			1 if string it is, 0 otherwise
  */
 int checkString (char *s)
 {
-	return !strcmp (s, ">") || !strcmp (s, "<") || !strcmp (s, "<<") || !strcmp (s, ">>") || !strcmp (s, "|") || !strcmp (s, "&");
+	if (strlen (s) > 2)
+		return 0;
+	if (strlen (s) == 1)
+		return s[0] == '>' || s[0] == '<' || s[0] == '&' || s[0] == ';' || s[0] == '|';
+	return !strcmp (s, "<<") || !strcmp (s, ">>") || !strcmp (s, "&&") || !strcmp (s, "||");
 }
 
 /**
@@ -542,9 +531,13 @@ int checkSyntax (char **params, int nparams)
 
 	if (checkString (params[0]) || checkString (params[nparams - 1]))
 		return 1;
-	for (i = 0; i < nparams - 1; i++)
+	for (i = 0; i < nparams - 1; ++i)
 		if (checkString (params[i]) && checkString (params[i + 1]))
+		{
+			printf ("Syntax error near %s\n", params[i]);
 			return 1;
+		}
+
 	return 0;
 }
 
@@ -555,9 +548,10 @@ int isInternal (char **command, int nparams) /* Too many strcmps!! */
 	if (strcmp (command[0], "cd") && strcmp (command[0], "exit") && strcmp (command[0], "jobs") && strcmp (command[0], "fg")
 	    && strcmp (command[0], "bg"))
 		return 0;
-	for (i = 1; i < nparams; i++)
-		if (!strcmp (command[i], "|"))
+	for (i = 1; i < nparams; ++i)
+		if (command[0][0] == '|')
 			return 0;
+
 	return 1;
 }
 
@@ -570,12 +564,12 @@ int waitProcessGroup (pid_t pgid)
 	while (waitpid (-pgid, &status, WUNTRACED) != -1)
 		if (WIFSTOPPED (status))
 		{
-			putchar ('\n');
 			ret = 1;
-			break;
+			break; /* Why the hell this break is neccesary??? */
 		}
 	tcsetpgrp (STDIN_FILENO, getpid ());
-
+	if (ret)
+		putchar ('\n');
 	return ret;
 }
 
@@ -656,16 +650,13 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 	char **command;
 
 	if (checkSyntax (params, nparams))
-	{
-		puts ("Syntax error!s");
 		return 0;
-	}
 
 	while (i < nparams)
 	{
 		conv = i;
 		cnt = 0;
-		while (++conv < nparams && strcmp (params[conv], "|"));
+		while (++conv < nparams && strcmp (params[conv], "|")); /* Change this later! */
 		if (i > 0)
 		{
 			if (pipes[0][0])
@@ -673,6 +664,7 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 			close (pipes[1][1]);
 			memcpy (pipes[0], pipes[1], sizeof (pipes[1]));
 		}
+
 		if (conv < nparams)
 			pipe (pipes[1]);
 
@@ -703,7 +695,7 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 				close (pipes[1][1]);
 			}
 
-			for (j = i; j < conv; j++)
+			for (j = i; j < conv; ++j) /* Cut this a bit? */
 				if (!strcmp (params[j], "<") || !strcmp (params[j], "<<"))
 				{
 					fd = open (params[j + 1], O_RDONLY);
@@ -747,33 +739,36 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 	return pgid;
 }
 
-int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
+int doJobs (char **params, int nparams, job_t **jobs, int *njobs) /* Also MEMORY ERRORS! */
 {
-	int i = 0, j;
+	int i = 0, divider = 0;
 	pid_t pgid;
 	while (i < nparams)
 	{
-		j = i;
-		while (++j < nparams && strcmp (params[j], "&"));
+		while (++divider < nparams && strcmp (params[divider], "&")); /* Change this too! */
 
-		if (j == nparams && isInternal (params + i, j - i))
+		/* Internal command */
+		if (divider == nparams && isInternal (params + i, divider - i))
 		{
-			if (internalCommand (params + i, j - i, jobs, njobs))
+			if (internalCommand (params + i, divider - i, jobs, njobs))
 				return 1;
 			return 0;
 		}
 
-		pgid = doCommands (params + i, j - i, *jobs, *njobs);
-		if (j == nparams)
+		pgid = doCommands (params + i, divider - i, *jobs, *njobs);
+
+		/* Foreground command */
+		if (divider == nparams)
 		{
 			if (waitProcessGroup (pgid))
-				if (addJob (jobs, njobs, params + i, j - i, pgid, ST_JUSTSTP))
+				if (addJob (jobs, njobs, params + i, divider - i, pgid, ST_JUSTSTP))
 					return 0;
 		}
+		/* Background command */
 		else
-			if (addJob (jobs, njobs, params + i, j - i, pgid, ST_RUNNING))
+			if (addJob (jobs, njobs, params + i, divider - i, pgid, ST_RUNNING))
 				return 0;
-		i = j + 1;
+		i = ++divider;
 	}
 
 	return 0;
@@ -789,34 +784,17 @@ int setEnvVars ()
 	int len;
 
 	if ((len = readlink ("/proc/self/exe", buf, BUF_SIZE - 1)) == -1)
-	{
-		perror ("Error getting program name");
 		return 1;
-	}
 	buf[len] = '\0';
 	if (setenv ("SHELL", buf, 1) == -1)
-	{
-		perror ("Error setting program name");
 		return 1;
-	}
 
 	sprintf (buf, "%d", geteuid ());
 	if (setenv ("EUID", buf, 1) == -1)
-	{
-		perror ("Error setting puid");
 		return 1;
-	}
 
-	if (getlogin_r (buf, BUF_SIZE))
-	{
-		perror ("Error getting user name");
+	if (getlogin_r (buf, BUF_SIZE) || setenv ("USER", buf, 1) == -1)
 		return 1;
-	}
-	if (setenv ("USER", buf, 1) == -1)
-	{
-		perror ("Error setting user name");
-		return 1;
-	}
 
 	return 0;
 }
@@ -833,7 +811,10 @@ int main ()
 	signal (SIGTSTP, SIG_IGN);
 
 	if (setEnvVars ())
+	{
+		perror ("Initialization error");
 		return 1;
+	}
 
 	printf (INPUT_STR);
 
