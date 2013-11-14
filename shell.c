@@ -133,33 +133,37 @@ int addParam (char ***params, int *nparams)
 	return 1;
 }
 
-int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid)
+int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid, status_t status)
 {
 	int len = nparams + 1, i;
 	job_t *ptr;
+	char *s;
 
 	if ((ptr = realloc (*jobs, (*njobs + 1) * sizeof (job_t))) == NULL)
 		return 1;
 
 	*jobs = ptr;
 	(*jobs)[*njobs].pgid = pgid;
-	(*jobs)[*njobs].status = ST_RUNNING;
+	(*jobs)[*njobs].status = status;
 
 	for (i = 0; i < nparams; i++)
 		len += strlen (command[i]);
 	if (((*jobs)[*njobs].job = calloc (len + 1, sizeof (char))) == NULL)
 		return 1;
 
-	(*jobs)[*njobs].job[0] = '\0';
+	s = (*jobs)[*njobs].job;
+	len = 0;
 	for (i = 0; i < nparams; i++)
 	{
-		len = strlen ((*jobs)[*njobs].job);
-		(*jobs)[*njobs].job[len] = ' ';
-		strcpy ((*jobs)[*njobs].job + len + 1, command[i]);
+		strcpy (s + len, command[i]);
+		len = strlen (s);
+		s[len] = ' ';
+		s[++len] = '\0';
 	}
 
-	printf ("[%d] %d\n", *njobs + 1, (*jobs)[*njobs].pgid);
-	(*njobs)++;
+	if (status == ST_RUNNING)
+		printf ("[%d] %d\n", *njobs + 1, (*jobs)[*njobs].pgid);
+	++(*njobs);
 	return 0;
 }
 
@@ -187,9 +191,9 @@ int deleteJob (job_t **jobs, int *njobs, int n) /* CHECK RETURN!!!!!!!!! */
 void clearJobs (job_t **jobs, int njobs)
 {
 	int i;
+
 	if (*jobs == NULL)
 		return;
-
 	for (i = 0; i < njobs; i++)
 		if ((*jobs)[i].job != NULL)
 			free ((*jobs)[i].job);
@@ -201,45 +205,50 @@ void showJobs (job_t *jobs, int njobs, int fullog)
 {
 	int i;
 	char status[10];
+
 	for (i = 0; i < njobs; i++)
-		if (jobs[i].status != ST_NONE)
+	{
+		if (jobs[i].status == ST_NONE || (!fullog && (jobs[i].status == ST_RUNNING || jobs[i].status == ST_STOPPED)))
+		    continue;
+		switch (jobs[i].status)
 		{
-			if (!fullog && (jobs[i].status == ST_DONE || jobs[i].status == ST_STOPPED))
-			    continue;
-			switch (jobs[i].status)
-			{
-				case ST_NONE:	 break;
-				case ST_DONE: 	 strcpy (status, "Done");	 break;
-				case ST_RUNNING: strcpy (status, "Running"); break;
-				case ST_JUSTSTP:
-				case ST_STOPPED: strcpy (status, "Stopped"); break;
-			}
-			printf ("[%d] %s\t\t%s\n", i + 1, status, jobs[i].job);
-			if (jobs[i].status == ST_JUSTSTP)
-				jobs[i].status = ST_STOPPED;
+			case ST_NONE:	 break;
+			case ST_DONE: 	 strcpy (status, "Done");	 break;
+			case ST_RUNNING: strcpy (status, "Running"); break;
+			case ST_JUSTSTP:
+			case ST_STOPPED: strcpy (status, "Stopped"); break;
 		}
+		printf ("[%d] %s\t\t%s\n", i + 1, status, jobs[i].job);
+		if (jobs[i].status == ST_JUSTSTP)
+			jobs[i].status = ST_STOPPED;
+	}
 }
 
-int checkJobs (job_t **jobs, int *njobs, int fullog) /* CHEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEECK*/
+int checkJobs (job_t **jobs, int *njobs, int fullog)
 {
 	int i, status;
-	pid_t pgid;
-	while ((pgid = waitpid (-1, &status, WNOHANG)) > 0)
+	pid_t pid, pgid;
+	for (i = 0; i < *njobs; i++)
 	{
-		for (i = 0; i < *njobs; i++)
-			if ((*jobs)[i].pgid == pgid)
+		if ((*jobs)[i].status == ST_NONE)
+			continue;
+		pgid = (*jobs)[i].pgid;
+		while ((pid = waitpid (-pgid, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0)
+			if ((*jobs)[i].pgid == pid)
 			{
-				(*jobs)[i].status = ST_DONE;
-				break;
+				if (WIFSTOPPED (status))
+					(*jobs)[i].status = ST_JUSTSTP;
+				else if (WIFCONTINUED (status))
+					(*jobs)[i].status = ST_RUNNING;
+				else
+					(*jobs)[i].status = ST_DONE;
 			}
 	}
 	showJobs (*jobs, *njobs, fullog);
 	for (i = 0; i < *njobs; i++)
 		if ((*jobs)[i].status == ST_DONE)
-		{
 			if (deleteJob (jobs, njobs, i))
 				return 1;
-		}
 	return 0;
 }
 
@@ -475,18 +484,19 @@ int placeEnv (char **params, int nparams)
  */
 void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 {
-	signal (SIGINT, SIG_DFL);
+	signal (SIGINT,  SIG_DFL);
 	signal (SIGTTOU, SIG_DFL);
+	signal (SIGTSTP, SIG_DFL);
 
 	if (!nparams || command[0][0] == '\0')
 		exit (0);
 
-	if (!strcmp (command[0], "cd") || !strcmp (command[0], "exit") || !strcmp (command[0], "fg"))
+	if (!strcmp (command[0], "cd") || !strcmp (command[0], "exit") || !strcmp (command[0], "fg") || !strcmp (command[0], "bg"))
 		exit (0);
 
 	if (!strcmp (command[0], "jobs"))
 	{
-		showJobs (jobs, njobs, 0);
+		showJobs (jobs, njobs, 1);
 		exit (0);
 	}
 
@@ -538,16 +548,35 @@ int checkSyntax (char **params, int nparams)
 	return 0;
 }
 
-int isInternal (char **command, int nparams)
+int isInternal (char **command, int nparams) /* Too many strcmps!! */
 {
 	int i;
 
-	if (strcmp (command[0], "cd") && strcmp (command[0], "exit") && strcmp (command[0], "jobs") && strcmp (command[0], "fg"))
+	if (strcmp (command[0], "cd") && strcmp (command[0], "exit") && strcmp (command[0], "jobs") && strcmp (command[0], "fg")
+	    && strcmp (command[0], "bg"))
 		return 0;
 	for (i = 1; i < nparams; i++)
 		if (!strcmp (command[i], "|"))
 			return 0;
 	return 1;
+}
+
+int waitProcessGroup (pid_t pgid)
+{
+	int status, ret = 0;
+
+	tcsetpgrp (STDIN_FILENO, pgid);
+	kill (-pgid, SIGCONT);
+	while (waitpid (-pgid, &status, WUNTRACED) != -1)
+		if (WIFSTOPPED (status))
+		{
+			putchar ('\n');
+			ret = 1;
+			break;
+		}
+	tcsetpgrp (STDIN_FILENO, getpid ());
+
+	return ret;
 }
 
 /**
@@ -576,7 +605,7 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 		checkJobs (jobs, njobs, 1);
 	else if (!strcmp (command[0], "fg"))
 	{
-		int n, pgid;
+		int n;
 		if (nparams == 1)
 			n = *njobs - 1;
 		else
@@ -586,21 +615,39 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 			puts ("No such job!");
 			return 0;
 		}
-		pgid = (*jobs)[n].pgid;
-		deleteJob (jobs, njobs, n);
-		tcsetpgrp (STDIN_FILENO, pgid);
-		kill (pgid, SIGCONT);
-		while (waitpid (-pgid, NULL, 0) != -1);
-		tcsetpgrp (STDIN_FILENO, getpid ());
+		if (waitProcessGroup ((*jobs)[n].pgid))
+			(*jobs)[n].status = ST_JUSTSTP;
+		else
+			deleteJob (jobs, njobs, n);
 	}
+	else if (!strcmp (command[0], "bg"))
+	{
+		int n;
+		if (nparams == 1)
+		{
+			n = *njobs;
+			while (--n >= 0 && (*jobs)[n].status != ST_STOPPED);
+		}
+		else
+			n = atoi (command[1]) - 1;
+		if (n < 0 || n >= *njobs)
+		{
+			puts ("No such job!");
+			return 0;
+		}
+		kill (-(*jobs)[n].pgid, SIGCONT);
+		printf ("[%d] %s\n", n + 1, (*jobs)[n].job);
+	}
+
 	return 0;
 }
 
 /**
- * Executes all the commands in the line, redirects input/output if needed
+ * Executes all the commands in the line, redirects input/output if needed and sets childs
+ * group id to that of a first process
  * @param params	string array
  * @param nparams	string count
- * @return			last child pid
+ * @return			process group id
  */
 pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 {
@@ -688,6 +735,8 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 			setpgid (0, pgid);
 			executeCommand (command, cnt, jobs, njobs);
 		}
+
+		setpgid (pid, pgid);
 		clearStrings (&command, cnt);
 		i = conv + 1;
 	}
@@ -715,14 +764,14 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs)
 		}
 
 		pgid = doCommands (params + i, j - i, *jobs, *njobs);
-		if (j == nparams)  /* If it is a foreground command */
+		if (j == nparams)
 		{
-			tcsetpgrp (STDIN_FILENO, pgid);
-			while (waitpid (-pgid, NULL, 0) != -1);
-			tcsetpgrp (STDIN_FILENO, getpid ());
+			if (waitProcessGroup (pgid))
+				if (addJob (jobs, njobs, params + i, j - i, pgid, ST_JUSTSTP))
+					return 0;
 		}
-		else  			   /* If it is a background command */
-			if (addJob (jobs, njobs, params + i, j - i, pgid))
+		else
+			if (addJob (jobs, njobs, params + i, j - i, pgid, ST_RUNNING))
 				return 0;
 		i = j + 1;
 	}
@@ -781,6 +830,7 @@ int main ()
 
 	signal (SIGINT, SIG_IGN);
 	signal (SIGTTOU, SIG_IGN);
+	signal (SIGTSTP, SIG_IGN);
 
 	if (setEnvVars ())
 		return 1;
