@@ -1,1 +1,1 @@
-A simple linux shell, capable of running commands and i/o redirection.
+A simple linux shell, capable of running commands, i/o redirection and job control.

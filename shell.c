@@ -123,6 +123,15 @@ int addParam (char ***params, int *nparams)
 	return 0;
 }
 
+/**
+ * Adds job to jobs array and initializes it
+ * @param jobs		pointer to a jobs array
+ * @param njobs		pointer to a jobs count
+ * @param command	string array to form .job field
+ * @param pgid		job's process group id
+ * @param status	job's initial status
+ * @return			0 on success, 1 on error
+ */
 int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid, status_t status)
 {
 	int len = nparams + 1, i;
@@ -156,6 +165,13 @@ int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid, sta
 	return 0;
 }
 
+/**
+ * Remove done job from jobs array
+ * @param jobs		pointer to a jobs array
+ * @param njobs		ponter to a jobs count
+ * @param n			job to delete
+ * @return			0 on success, 1 on error
+ */
 int deleteJob (job_t **jobs, int *njobs, int n) /* CHECK RETURN!!!!!!!!! */
 {
 	int i;
@@ -177,6 +193,11 @@ int deleteJob (job_t **jobs, int *njobs, int n) /* CHECK RETURN!!!!!!!!! */
 	return 0;
 }
 
+/**
+ * Free jobs array
+ * @param jobs		pointer to a jobs array
+ * @param njobs		jobs count
+ */
 void clearJobs (job_t **jobs, int njobs)
 {
 	int i;
@@ -190,6 +211,12 @@ void clearJobs (job_t **jobs, int njobs)
 	*jobs = NULL;
 }
 
+/**
+ * Show jobs status
+ * @param jobs		jobs array
+ * @param njobs		jobs count
+ * @param fulllog	determines if the every job should be listed (1) or only done and just stopped ones (0)
+ */
 void showJobs (job_t *jobs, int njobs, int fullog)
 {
 	int i;
@@ -211,6 +238,13 @@ void showJobs (job_t *jobs, int njobs, int fullog)
 	}
 }
 
+/**
+ * Remove done job from jobs array
+ * @param jobs		pointer to a jobs array
+ * @param njobs		ponter to a jobs count
+ * @param fulllog	determines if the every job should be listed (1) or only done and just stopped ones (0)
+ * @return			0 on success, 1 on error
+ */
 int checkJobs (job_t **jobs, int *njobs, int fullog)
 {
 	int i, status;
@@ -529,8 +563,16 @@ int checkSyntax (char **params, int nparams)
 {
 	int i;
 
-	if (checkString (params[0]) || checkString (params[nparams - 1]))
+	if (checkString (params[0]))
+	{
+		printf ("Syntax error near %s\n", params[0]);
 		return 1;
+	}
+	if (checkString (params[nparams - 1]))
+	{
+		printf ("Syntax error near %s\n", params[nparams - 1]);
+		return 1;
+	}
 	for (i = 0; i < nparams - 1; ++i)
 		if (checkString (params[i]) && checkString (params[i + 1]))
 		{
@@ -541,6 +583,12 @@ int checkSyntax (char **params, int nparams)
 	return 0;
 }
 
+/**
+ * Checks if command given is a simple internal one (without pipeline)
+ * @param params	string array
+ * @param nparams	string count
+ * @return			1 on internal, 0 otherwise
+ */
 int isInternal (char **command, int nparams) /* Too many strcmps!! */
 {
 	int i;
@@ -555,6 +603,13 @@ int isInternal (char **command, int nparams) /* Too many strcmps!! */
 	return 1;
 }
 
+/**
+ * Shifts foreground group to that of the given process group and waits for all the
+ * proceses in it to finish
+ * @param params	string array
+ * @param nparams	string count
+ * @return			0 on correct syntax, 1 on incorrect
+ */
 int waitProcessGroup (pid_t pgid)
 {
 	int status, ret = 0;
@@ -739,21 +794,30 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 	return pgid;
 }
 
+/**
+ * Parses the commands divided by & to doCommand function, conrols jobs
+ * @param params	string array
+ * @param nparams	string count
+ * @param jobs		pointer to jobs array
+ * @param njobs		pointer to jobs count
+ * @return			0 on normal command, 1 on exit
+ */
 int doJobs (char **params, int nparams, job_t **jobs, int *njobs) /* Also MEMORY ERRORS! */
 {
 	int i = 0, divider = 0;
 	pid_t pgid;
 	while (i < nparams)
 	{
-		while (++divider < nparams && strcmp (params[divider], "&")); /* Change this too! */
+		while (strcmp (params[divider], "&") && ++divider < nparams); /* Change this too! */
+		if (divider == i)
+		{
+			puts ("Syntax error near &");
+			return 0;
+		}
 
 		/* Internal command */
 		if (divider == nparams && isInternal (params + i, divider - i))
-		{
-			if (internalCommand (params + i, divider - i, jobs, njobs))
-				return 1;
-			return 0;
-		}
+			return internalCommand (params + i, divider - i, jobs, njobs);
 
 		pgid = doCommands (params + i, divider - i, *jobs, *njobs);
 
