@@ -11,15 +11,16 @@
 #define STR_SIZE 128
 #define PARAM_COUNT 4
 #define BUF_SIZE 1024
-#define INPUT_STR "$ "
+#define MAX_HOST_NAME 50
+#define DEF_PROMPT "$ "
 
 /* Todo:
  * -New line after CTR-C, need to add general child's return status checker
  * -Check if jobs operations are successfull
  * -Commands and redirectors written together
-*/
+ */
 
-typedef enum { RET_OK, RET_ERR, RET_EOF, RET_MEMORYERR } ret_result_t;
+typedef enum { RET_OK, RET_ERR, RET_EOF, RET_MEMORYERR } result_t;
 typedef enum { ST_NONE, ST_RUNNING, ST_DONE, ST_STOPPED, ST_JUSTSTP } status_t;
 
 typedef struct
@@ -29,13 +30,7 @@ typedef struct
 	status_t status;
 } job_t;
 
-/**
- * Checks if there is enough allocated space to add another charachter to a string and allocates new
- * memory if necessary
- * @param str 	pointer to a string
- * @param len 	new string length
- * @return		0 on success, 1 on error
- */
+/* Reallocates str if it has reached maximum capacity */
 int checkStringLen (char **str, int len)
 {
 	char *ptr;
@@ -49,13 +44,7 @@ int checkStringLen (char **str, int len)
 	return 0;
 }
 
-/**
- * Checks if there is enough allocated space to add another string to a string array and allocates
- * new memory if necessary
- * @param params	pointer to a string array
- * @param nparams	new strings count
- * @return 			0 on success, 1 on error
- */
+/* Realocates params if it has reached maximum capacity */
 int checkParamCnt (char ***params, int nparams)
 {
 	char **ptr;
@@ -69,12 +58,7 @@ int checkParamCnt (char ***params, int nparams)
 	return 0;
 }
 
-/**
- * Adds null terminator to a string and allocates new memory if necessary
- * @param str		pointer to a string
- * @param len		current string length
- * @return			0 on success, 1 on error
- */
+/* Adds null terminator to a string, reallocates it if neccessary */
 int endString (char **str, int len)
 {
 	char *ptr;
@@ -90,13 +74,7 @@ int endString (char **str, int len)
 	return 0;
 }
 
-/**
- * Adds character to a string, allocates new memory if necessary and increases len by 1
- * @param str	pointer to a string
- * @param len	pointer to a current string length
- * @param ch	character to add
- * @return		0 on success, 1 on error
- */
+/* Adds ch to a string */
 int addChar (char **str, int *len, char ch)
 {
 	if (checkStringLen (str, *len))
@@ -106,12 +84,7 @@ int addChar (char **str, int *len, char ch)
 	return 0;
 }
 
-/**
- * Adds string to a string array, allocates new memory if necessary and increases nparams by 1
- * @param params	pointer to a string array
- * @param nparams	pointer to a current parameters count
- * @return			0 on success, 1 on error
- */
+/* Adds one parameter to params */
 int addParam (char ***params, int *nparams)
 {
 	if (*nparams)
@@ -123,15 +96,21 @@ int addParam (char ***params, int *nparams)
 	return 0;
 }
 
-/**
- * Adds job to jobs array and initializes it
- * @param jobs		pointer to a jobs array
- * @param njobs		pointer to a jobs count
- * @param command	string array to form .job field
- * @param pgid		job's process group id
- * @param status	job's initial status
- * @return			0 on success, 1 on error
- */
+/* Frees params array */
+void clearParams (char ***params, int nparams)
+{
+	int i;
+
+	if (params == NULL)
+		return;
+	for (i = 0; i < nparams; ++i)
+		free ((*params)[i]);
+	free (*params);
+
+	*params = NULL;
+}
+
+/* Adds new entry to jobs array, initializes the structure with given data */
 int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid, status_t status)
 {
 	int len = nparams + 1, i;
@@ -165,13 +144,7 @@ int addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid, sta
 	return 0;
 }
 
-/**
- * Remove done job from jobs array
- * @param jobs		pointer to a jobs array
- * @param njobs		ponter to a jobs count
- * @param n			job to delete
- * @return			0 on success, 1 on error
- */
+/* Deletes done entry form jobs array */
 int deleteJob (job_t **jobs, int *njobs, int n) /* CHECK RETURN!!!!!!!!! */
 {
 	int i;
@@ -193,11 +166,7 @@ int deleteJob (job_t **jobs, int *njobs, int n) /* CHECK RETURN!!!!!!!!! */
 	return 0;
 }
 
-/**
- * Free jobs array
- * @param jobs		pointer to a jobs array
- * @param njobs		jobs count
- */
+/* Frees jobs array */
 void clearJobs (job_t **jobs, int njobs)
 {
 	int i;
@@ -211,12 +180,7 @@ void clearJobs (job_t **jobs, int njobs)
 	*jobs = NULL;
 }
 
-/**
- * Show jobs status
- * @param jobs		jobs array
- * @param njobs		jobs count
- * @param fulllog	determines if the every job should be listed (1) or only done and just stopped ones (0)
- */
+/* Show current jobs status */
 void showJobs (job_t *jobs, int njobs, int fullog)
 {
 	int i;
@@ -238,13 +202,7 @@ void showJobs (job_t *jobs, int njobs, int fullog)
 	}
 }
 
-/**
- * Remove done job from jobs array
- * @param jobs		pointer to a jobs array
- * @param njobs		ponter to a jobs count
- * @param fulllog	determines if the every job should be listed (1) or only done and just stopped ones (0)
- * @return			0 on success, 1 on error
- */
+/* Checks jobs statuses. fullog determines if all the jobs should be shown, or only the done and just stopped ones */
 int checkJobs (job_t **jobs, int *njobs, int fullog)
 {
 	int i, status;
@@ -276,17 +234,13 @@ int checkJobs (job_t **jobs, int *njobs, int fullog)
 	return 0;
 }
 
-/**
- * Reads character string from stdin and divides it into substrings, separated by space characters,
- * considering quotes, backslash-escaping and comments
- * @param params	pointer to a string array to store substrings
- * @param nparams	pointer to an integer to return substring count
- * @return			RET_OK - command is correct
- *					RET_ERR - wrong command format
- *					RET_EOF - EOF found
- *					RET_MEMORYERR - memory allocation error
+/* Reads the infinite string and parses it into substrings array. Return statuses:
+ * RET_OK  - command is correct
+ * RET_ERR - wrong command format
+ * RET_EOF - EOF found
+ * RET_MEMORYERR - memory allocation error
  */
-ret_result_t readCommand (char ***params, int *nparams)
+result_t readCommand (char ***params, int *nparams)
 {
 	enum { IN_INITIAL, IN_WORD, IN_BETWEEN, IN_SCREEN, IN_QUOTES, IN_COMMENT, IN_ERROR } state = IN_INITIAL, previous;
 	int ch, len = 0;
@@ -420,30 +374,7 @@ ret_result_t readCommand (char ***params, int *nparams)
 	}
 }
 
-/**
- * Frees allocated string array
- * @param params	pointer to a string array
- * @param nparams	strings count
- */
-void clearStrings (char ***params, int nparams)
-{
-	int i;
-
-	if (params == NULL)
-		return;
-	for (i = 0; i < nparams; ++i)
-		free ((*params)[i]);
-	free (*params);
-
-	*params = NULL;
-}
-
-/**
- * Changes environmental variable names prefixed with $ to their values
- * @param params	string array
- * @param nparams	strings count
- * @return			0 on success, 1 on error
- */
+/* Replaces environmental variables with their value */
 int placeEnv (char **params, int nparams)
 {
 	int i;
@@ -499,11 +430,7 @@ int placeEnv (char **params, int nparams)
 	return 0;
 }
 
-/**
- * Executes one shell command given in the string array and exits
- * @param command	string array
- * @param nparams	strings count
- */
+/* Executes a straightforward command (no pipes, no dividers - just command with parameters) */
 void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 {
 	signal (SIGINT,  SIG_DFL);
@@ -524,7 +451,7 @@ void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 		char *s = getcwd (NULL, 0);
 		if (s == NULL)
 		{
-			perror ("Error getting current directory");
+			perror ("xish: error getting current directory");
 			exit (0);
 		}
 		puts (s);
@@ -538,11 +465,7 @@ void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 	exit (1);
 }
 
-/**
- * Checks if a string is a special character
- * @param s			string to check
- * @return			1 if string it is, 0 otherwise
- */
+/* Checks if a string given is a special character */
 int checkString (char *s)
 {
 	if (strlen (s) > 2)
@@ -552,44 +475,33 @@ int checkString (char *s)
 	return !strcmp (s, "<<") || !strcmp (s, ">>") || !strcmp (s, "&&") || !strcmp (s, "||");
 }
 
-/**
- * Checks if the syntax given in the command is correct (e.g. there is always a parameter for file
- * input/output redirection)
- * @param params	string array
- * @param nparams	string count
- * @return			0 on correct syntax, 1 on incorrect
- */
+/* Checks if command's syntax is correct */
 int checkSyntax (char **params, int nparams)
 {
 	int i;
 
 	if (checkString (params[0]))
 	{
-		printf ("Syntax error near %s\n", params[0]);
+		printf ("xish: syntax error near %s\n", params[0]);
 		return 1;
 	}
 	if (checkString (params[nparams - 1]))
 	{
-		printf ("Syntax error near %s\n", params[nparams - 1]);
+		printf ("xish: syntax error near %s\n", params[nparams - 1]);
 		return 1;
 	}
 	for (i = 0; i < nparams - 1; ++i)
 		if (checkString (params[i]) && checkString (params[i + 1]))
 		{
-			printf ("Syntax error near %s\n", params[i]);
+			printf ("xish: syntax error near %s\n", params[i]);
 			return 1;
 		}
 
 	return 0;
 }
 
-/**
- * Checks if command given is a simple internal one (without pipeline)
- * @param params	string array
- * @param nparams	string count
- * @return			1 on internal, 0 otherwise
- */
-int isInternal (char **command, int nparams) /* Too many strcmps!! */
+/* Checks if command is internal that must be executed in the main process */
+int isInternal (char **command, int nparams)
 {
 	int i;
 
@@ -603,13 +515,7 @@ int isInternal (char **command, int nparams) /* Too many strcmps!! */
 	return 1;
 }
 
-/**
- * Shifts foreground group to that of the given process group and waits for all the
- * proceses in it to finish
- * @param params	string array
- * @param nparams	string count
- * @return			0 on correct syntax, 1 on incorrect
- */
+/* Shifts process group to foreground and waits for it to finish */
 int waitProcessGroup (pid_t pgid)
 {
 	int status, ret = 0;
@@ -628,13 +534,7 @@ int waitProcessGroup (pid_t pgid)
 	return ret;
 }
 
-/**
- * Checks if a command given is an internal command, that needs to be executed
- * in the main process, rather than in fork (), and executes it if needed
- * @param command	string array
- * @param nparams	string count
- * @return			1 on exit, 0 on non-exit
- */
+/* Executes internal command */
 int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 {
 	if (!strcmp (command[0], "exit"))
@@ -644,11 +544,11 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 		if (nparams == 1)
 		{
 			if (chdir (getenv ("HOME")))
-				perror ("Error changing directory");
+				perror ("xish: error changing directory");
 		}
 		else
 			if (chdir (command[1]))
-				perror ("Error changing directory");
+				perror ("xish: error changing directory");
 	}
 	else if (!strcmp (command[0], "jobs"))
 		checkJobs (jobs, njobs, 1);
@@ -661,7 +561,7 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 			n = atoi (command[1]) - 1;
 		if (n < 0 || n >= *njobs)
 		{
-			puts ("No such job!");
+			puts ("xish: no such job");
 			return 0;
 		}
 		if (waitProcessGroup ((*jobs)[n].pgid))
@@ -691,13 +591,7 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 	return 0;
 }
 
-/**
- * Executes all the commands in the line, redirects input/output if needed and sets childs
- * group id to that of a first process
- * @param params	string array
- * @param nparams	string count
- * @return			process group id
- */
+/* Organizes i/o redirection */
 pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 {
 	pid_t pid, pgid;
@@ -728,8 +622,8 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 
 		if ((pid = fork ()) < 0)
 		{
-			perror ("Error creating child process");
-			clearStrings (&command, cnt);
+			perror ("xish: error creating child process");
+			clearParams (&command, cnt);
 			return 0;
 		}
 
@@ -784,7 +678,7 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 		}
 
 		setpgid (pid, pgid);
-		clearStrings (&command, cnt);
+		clearParams (&command, cnt);
 		i = conv + 1;
 	}
 
@@ -794,14 +688,7 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 	return pgid;
 }
 
-/**
- * Parses the commands divided by & to doCommand function, conrols jobs
- * @param params	string array
- * @param nparams	string count
- * @param jobs		pointer to jobs array
- * @param njobs		pointer to jobs count
- * @return			0 on normal command, 1 on exit
- */
+/* Organizes background and foreground jobs */
 int doJobs (char **params, int nparams, job_t **jobs, int *njobs) /* Also MEMORY ERRORS! */
 {
 	int i = 0, divider = 0;
@@ -811,7 +698,7 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs) /* Also MEMORY
 		while (strcmp (params[divider], "&") && ++divider < nparams); /* Change this too! */
 		if (divider == i)
 		{
-			puts ("Syntax error near &");
+			puts ("xish: syntax error near &");
 			return 0;
 		}
 
@@ -838,10 +725,7 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs) /* Also MEMORY
 	return 0;
 }
 
-/**
- * Initializes some environmental variables
- * @return		0 on success, 1 on error
- */
+/* Sets some environmental variables for later use */
 int setEnvVars ()
 {
 	char buf[BUF_SIZE];
@@ -863,29 +747,49 @@ int setEnvVars ()
 	return 0;
 }
 
+/* Initialize xish */
+int doInit ()
+{
+	if (setEnvVars ())
+	{
+		perror ("xish: initialization error");
+		return 1;
+	}
+
+	return 0;
+}
+
+/* Show input prompt */
+void showPrompt ()
+{
+	char hostname[MAX_HOST_NAME], *cwd = getcwd (NULL, 0);
+	if (gethostname (hostname, MAX_HOST_NAME) || cwd == NULL)
+		printf (DEF_PROMPT);
+	printf ("%s@%s %s $ ", getlogin (), hostname, cwd);
+	free (cwd);
+}
+
+/* Just a main... */
 int main ()
 {
 	int nparams, njobs = 0;
 	char **params = NULL;
 	job_t *jobs = NULL;
-	ret_result_t ret;
+	result_t ret;
 
 	signal (SIGINT, SIG_IGN);
 	signal (SIGTTOU, SIG_IGN);
 	signal (SIGTSTP, SIG_IGN);
 
-	if (setEnvVars ())
-	{
-		perror ("Initialization error");
+	if (doInit ())
 		return 1;
-	}
 
-	printf (INPUT_STR);
+	showPrompt ();
 
 	while ((ret = readCommand (&params, &nparams)) < RET_EOF)
 	{
 		if (ret == RET_ERR)
-			puts ("Wrong format!");
+			puts ("xish: wrong command format");
 		else
 		{
 			if (placeEnv (params, nparams))
@@ -894,22 +798,22 @@ int main ()
 				break;
 		}
 
-		clearStrings (&params, nparams);
+		clearParams (&params, nparams);
 		if (checkJobs (&jobs, &njobs, 0))
 		{
 			ret = RET_MEMORYERR;
 			break;
 		}
-		printf (INPUT_STR);
+		showPrompt ();
 	}
 
 	if (ret == RET_MEMORYERR)
 	{
 		putchar ('\n');
-		puts ("Memory allocation error!");
+		puts ("xish: memory allocation error");
 	}
 
-	clearStrings (&params, nparams);
+	clearParams (&params, nparams);
 	clearJobs (&jobs, njobs);
 
 	return 0;

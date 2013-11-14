@@ -1,1 +1,6 @@
-A simple linux shell, capable of running commands, i/o redirection and job control.
+xish is a xilus's linux shell.
+
+What is it capable of at the moment:
+-normal command execution
+-i/o redirection
+-job control
