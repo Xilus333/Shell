@@ -3,19 +3,20 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
 
 #define STR_SIZE 128
-#define PARAM_COUNT 4
-#define BUF_SIZE 1024
-#define MAX_HOST_NAME 50
-#define DEF_PROMPT "$ "
+#define PARAM_COUNT 5
+#define DFL_PROMPT "$ "
 
 /* Todo:
- * -New line after CTR-C, need to add general child's return status checker
+ * -New line after CTR-C?
+ * -Move checkJobs, so "jobs" could be redirected?
+ * -Brackets
  * -Check if jobs operations are successfull
  * -Commands and redirectors written together
  */
@@ -433,10 +434,6 @@ int placeEnv (char **params, int nparams)
 /* Executes a straightforward command (no pipes, no dividers - just command with parameters) */
 void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 {
-	signal (SIGINT,  SIG_DFL);
-	signal (SIGTTOU, SIG_DFL);
-	signal (SIGTSTP, SIG_DFL);
-
 	if (!nparams || command[0][0] == '\0')
 		exit (0);
 	if (!strcmp (command[0], "cd") || !strcmp (command[0], "exit") || !strcmp (command[0], "fg") || !strcmp (command[0], "bg"))
@@ -509,29 +506,26 @@ int isInternal (char **command, int nparams)
 	    && strcmp (command[0], "bg"))
 		return 0;
 	for (i = 1; i < nparams; ++i)
-		if (command[0][0] == '|')
+		if (command[i][0] == '|')
 			return 0;
 
 	return 1;
 }
 
-/* Shifts process group to foreground and waits for it to finish */
+/* Shifts process group to foreground and waits for it to finish. Returns 1 if the process was stopped and 0 if it has termeniated */
 int waitProcessGroup (pid_t pgid)
 {
-	int status, ret = 0;
+	int st;
 
 	tcsetpgrp (STDIN_FILENO, pgid);
 	kill (-pgid, SIGCONT);
-	while (waitpid (-pgid, &status, WUNTRACED) != -1)
-		if (WIFSTOPPED (status))
-		{
-			ret = 1;
-			break; /* Why the hell this break is neccesary??? */
-		}
+	waitpid (pgid, &st, WUNTRACED);
 	tcsetpgrp (STDIN_FILENO, getpid ());
-	if (ret)
+
+	if (WIFSTOPPED (st))
 		putchar ('\n');
-	return ret;
+
+	return WIFSTOPPED (st);
 }
 
 /* Executes internal command */
@@ -591,10 +585,10 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 	return 0;
 }
 
-/* Organizes i/o redirection */
+/* Organizes i/o redirection. Returns pid of last process in the pipeline, responsible for <, >, >> and | */
 pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 {
-	pid_t pid, pgid;
+	pid_t pid;
 	int i = 0, j, conv, cnt, pipes[2][2]={{0}}, fd;
 	char **command;
 
@@ -626,9 +620,6 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 			clearParams (&command, cnt);
 			return 0;
 		}
-
-		if (i == 0) /* If it is was first fork */
-			pgid = pid;
 
 		if (!pid)
 		{
@@ -673,11 +664,9 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 				}
 
 			command[cnt] = NULL;
-			setpgid (0, pgid);
 			executeCommand (command, cnt, jobs, njobs);
 		}
 
-		setpgid (pid, pgid);
 		clearParams (&command, cnt);
 		i = conv + 1;
 	}
@@ -685,42 +674,94 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 	if (pipes[0][0])
 		close (pipes[0][0]);
 
-	return pgid;
+	return pid;
 }
 
-/* Organizes background and foreground jobs */
-int doJobs (char **params, int nparams, job_t **jobs, int *njobs) /* Also MEMORY ERRORS! */
+/* Executes one job in its own process group, MUST be run in fork, responsible for && and || */
+int controlJob (char **command, int nparams, job_t *jobs, int njobs)
 {
-	int i = 0, divider = 0;
-	pid_t pgid;
-	while (i < nparams)
+	int begin = 0, divider = 0, status, res = 1;
+	pid_t pid;
+	setpgid (0, 0);
+
+	signal (SIGINT,  SIG_DFL);
+	signal (SIGTTOU, SIG_DFL);
+	signal (SIGTSTP, SIG_DFL);
+
+	while (begin < nparams)
 	{
-		while (strcmp (params[divider], "&") && ++divider < nparams); /* Change this too! */
-		if (divider == i)
+		while (strcmp (command[divider], "&&") && strcmp (command[divider], "||") && ++divider < nparams);
+		if (begin > 0 && ((command[begin - 1][0] == '&' && !res) || (command[begin - 1][0] == '|' && res)))
 		{
-			puts ("xish: syntax error near &");
+			begin = ++divider;
+			continue;
+		}
+
+		pid = doCommands (command + begin, divider - begin, jobs, njobs);
+		waitpid (pid, &status, 0);
+		res = WEXITSTATUS (status) == 0;
+
+		begin = ++divider;
+	}
+
+	exit (0);
+}
+
+/* Launches background and foreground jobs, responsible for ; and & */
+int launchJobs (char **params, int nparams, job_t **jobs, int *njobs) 				/* Also MEMORY ERRORS! */
+{
+	int begin = 0, divider = 0, isforeground;
+	pid_t pid;
+	while (begin < nparams)
+	{
+		while (strcmp (params[divider], "&") && strcmp (params[divider], ";") && ++divider < nparams);
+		isforeground = divider == nparams || params[divider][0] == ';';
+		if (divider == begin)
+		{
+			printf ("xish: syntax error near %c\n", params[divider][0]);
 			return 0;
 		}
 
 		/* Internal command */
-		if (divider == nparams && isInternal (params + i, divider - i))
-			return internalCommand (params + i, divider - i, jobs, njobs);
+		if (isforeground && isInternal (params + begin, divider - begin))
+		{
+			if (internalCommand (params + begin, divider - begin, jobs, njobs))
+				return 1;
+			else
+			{
+				begin = ++divider;
+				continue;
+			}
+		}
 
-		pgid = doCommands (params + i, divider - i, *jobs, *njobs);
+		if ((pid = fork ()) < 0)
+		{
+			perror ("xish: error creating child process");
+			return 0;
+		}
+		else if (!pid)
+			controlJob (params + begin, divider - begin, *jobs, *njobs);
+		setpgid (pid, pid);
 
 		/* Foreground command */
-		if (divider == nparams)
+		if (isforeground)
 		{
-			if (waitProcessGroup (pgid))
-				if (addJob (jobs, njobs, params + i, divider - i, pgid, ST_JUSTSTP))
+			if (waitProcessGroup (pid))
+				if (addJob (jobs, njobs, params + begin, divider - begin, pid, ST_JUSTSTP))
 					return 0;
 		}
 		/* Background command */
 		else
-			if (addJob (jobs, njobs, params + i, divider - i, pgid, ST_RUNNING))
+			if (addJob (jobs, njobs, params + begin, divider - begin, pid, ST_RUNNING))
 				return 0;
-		i = ++divider;
+		begin = ++divider;
 	}
+
+	return 0;
+}
+
+int launchSubshells (char **params, int nparams, job_t **jobs, int *njobs)
+{
 
 	return 0;
 }
@@ -728,10 +769,10 @@ int doJobs (char **params, int nparams, job_t **jobs, int *njobs) /* Also MEMORY
 /* Sets some environmental variables for later use */
 int setEnvVars ()
 {
-	char buf[BUF_SIZE];
+	char buf[PATH_MAX];
 	int len;
 
-	if ((len = readlink ("/proc/self/exe", buf, BUF_SIZE - 1)) == -1)
+	if ((len = readlink ("/proc/self/exe", buf, PATH_MAX - 1)) == -1)
 		return 1;
 	buf[len] = '\0';
 	if (setenv ("SHELL", buf, 1) == -1)
@@ -741,7 +782,7 @@ int setEnvVars ()
 	if (setenv ("EUID", buf, 1) == -1)
 		return 1;
 
-	if (getlogin_r (buf, BUF_SIZE) || setenv ("USER", buf, 1) == -1)
+	if (getlogin_r (buf, PATH_MAX) || setenv ("USER", buf, 1) == -1)
 		return 1;
 
 	return 0;
@@ -762,9 +803,9 @@ int doInit ()
 /* Show input prompt */
 void showPrompt ()
 {
-	char hostname[MAX_HOST_NAME], *cwd = getcwd (NULL, 0);
-	if (gethostname (hostname, MAX_HOST_NAME) || cwd == NULL)
-		printf (DEF_PROMPT);
+	char hostname[HOST_NAME_MAX], *cwd = getcwd (NULL, 0);
+	if (gethostname (hostname, HOST_NAME_MAX) || cwd == NULL)
+		printf (DFL_PROMPT);
 	printf ("%s@%s %s $ ", getlogin (), hostname, cwd);
 	free (cwd);
 }
@@ -794,7 +835,7 @@ int main ()
 		{
 			if (placeEnv (params, nparams))
 				continue;
-			if (doJobs (params, nparams, &jobs, &njobs))
+			if (launchJobs (params, nparams, &jobs, &njobs))
 				break;
 		}
 
