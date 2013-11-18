@@ -12,26 +12,31 @@
 #define STR_SIZE 128
 #define PARAM_COUNT 5
 #define DFL_PROMPT "$ "
-#define SIG_FATALERR SIGUSR1
-#define SIG_EXIT SIGUSR2
 
 /* Todo:
  * -New line after CTR-C?
  * -Move checkJobs, so "jobs" could be redirected?
  * -Rework internal command handling
  * -Normal syntax check
- * -Commands and redirectors written together, special character taging!
  */
 
 typedef enum { RET_OK, RET_ERR, RET_EOF } result_t;
 typedef enum { ST_NONE, ST_RUNNING, ST_DONE, ST_STOPPED, ST_JUSTSTP } status_t;
-
+typedef enum { WT_WORD = 0, WT_LBRACKET, WT_RBRACKET, WT_FILERD, WT_FILEWRTRUNC, WT_FILEWRAPPEND, WT_BACKGROUND,
+               WT_AND, WT_OR, WT_SEMICOLON, WT_PIPE } word_t;
 typedef struct
 {
 	char *job;
 	int pgid;
 	status_t status;
 } job_t;
+
+typedef struct
+{
+	char *word;
+	word_t type;
+} param_t;
+
 
 /* Terminates program */
 void fatalError ()
@@ -47,37 +52,27 @@ void checkStringLen (char **str, int len)
 
 	if (len % STR_SIZE > 0)
 		return;
+	if (len == 0)
+		*str = NULL;
 	if ((ptr = realloc (*str, (len + STR_SIZE) * sizeof (char))) == NULL)
-		fatalError ();
-
+			fatalError ();
 	*str = ptr;
 }
 
-/* Realocates params if it has reached maximum capacity */
-void checkParamCnt (char ***params, int nparams)
-{
-	char **ptr;
-
-	if (nparams % PARAM_COUNT > 0)
-		return;
-	if ((ptr = realloc (*params, (nparams + PARAM_COUNT) * sizeof (char *))) == NULL)
-		fatalError ();
-
-	*params = ptr;
-}
 
 /* Adds null terminator to a string, reallocates it if neccessary */
 void endString (char **str, int len)
 {
 	char *ptr;
 
+	if (len == 0)
+		*str = NULL;
 	if (len % STR_SIZE == 0)
 	{
 		if ((ptr = realloc (*str, (len + 1) * sizeof (char))) == NULL)
 			fatalError ();
 		*str = ptr;
 	}
-
 	(*str)[len] = '\0';
 }
 
@@ -88,31 +83,46 @@ void addChar (char **str, int *len, char ch)
 	(*str)[(*len)++] = ch;
 }
 
-/* Adds one parameter to params */
-void addParam (char ***params, int *nparams)
+/* Realocates params if it has reached maximum capacity */
+void checkParamCnt (param_t **params, int nparams)
 {
-	if (*nparams)
-		checkParamCnt (params, *nparams + 1);
-	if (((*params)[(*nparams)++] = calloc (STR_SIZE, sizeof (char))) == NULL)
+	param_t *ptr;
+
+	if (nparams % PARAM_COUNT > 0)
+		return;
+	if ((ptr = realloc (*params, (nparams + PARAM_COUNT) * sizeof (param_t))) == NULL)
 		fatalError ();
+
+	*params = ptr;
+}
+
+/* Adds one parameter to params */
+void addParam (param_t **params, int *nparams, word_t ptype)
+{
+	if (*nparams == 0)
+		checkParamCnt (params, 0);
+	else
+		checkParamCnt (params, *nparams + 1);
+	(*params)[(*nparams)++].type = ptype;
 }
 
 /* Frees params array */
-void clearParams (char ***params, int nparams)
+void clearParams (param_t **params, int nparams)
 {
 	int i;
 
 	if (params == NULL)
 		return;
 	for (i = 0; i < nparams; ++i)
-		free ((*params)[i]);
+		if ((*params)[i].type == WT_WORD)
+			free ((*params)[i].word);
 	free (*params);
 
 	*params = NULL;
 }
 
 /* Adds new entry to jobs array, initializes the structure with given data */
-void addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid, status_t status)
+void addJob (job_t **jobs, int *njobs, param_t *command, int nparams, int pgid, status_t status)
 {
 	int len = nparams + 1, i;
 	job_t *ptr;
@@ -126,14 +136,14 @@ void addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid, st
 	ptr->status = status;
 
 	for (i = 0; i < nparams; ++i)
-		len += strlen (command[i]);
+		len += strlen (command[i].word);
 	if ((ptr->job = calloc (len + 1, sizeof (char))) == NULL)
 		fatalError ();
 
 	len = 0;
 	for (i = 0; i < nparams; ++i)
 	{
-		strcpy (ptr->job + len, command[i]);
+		strcpy (ptr->job + len, command[i].word);
 		len = strlen (ptr->job);
 		ptr->job[len] = ' ';
 		ptr->job[++len] = '\0';
@@ -145,7 +155,7 @@ void addJob (job_t **jobs, int *njobs, char **command, int nparams, int pgid, st
 }
 
 /* Deletes done entry form jobs array */
-void deleteJob (job_t **jobs, int *njobs, int n) /* CHECK RETURN!!!!!!!!! */
+void deleteJob (job_t **jobs, int *njobs, int n)
 {
 	int i;
 	job_t *ptr;
@@ -229,35 +239,59 @@ void checkJobs (job_t **jobs, int *njobs, int fullog)
 			deleteJob (jobs, njobs, i);
 }
 
+/* Return special sequence meaning */
+word_t charType (char ch, word_t prev)
+{
+	if (ch == '>' && prev == WT_FILEWRTRUNC) return WT_FILEWRAPPEND;
+	if (ch == '|' && prev == WT_PIPE)		 return WT_OR;
+	if (ch == '&' && prev == WT_BACKGROUND)	 return WT_AND;
+	if (prev != 0) return 0;
+	if (ch == '>') return WT_FILEWRTRUNC;
+	if (ch == '<') return WT_FILERD;
+	if (ch == '&') return WT_BACKGROUND;
+	if (ch == '|') return WT_PIPE;
+	if (ch == '(') return WT_LBRACKET;
+	if (ch == ')') return WT_RBRACKET;
+	if (ch == ';') return WT_SEMICOLON;
+	return 0;
+}
+
 /* Reads the infinite string and parses it into substrings array. Return statuses:
  * RET_OK  - command is correct
  * RET_ERR - wrong command format
  * RET_EOF - EOF found
  * RET_MEMORYERR - memory allocation error
  */
-result_t readCommand (char ***params, int *nparams)
+result_t readCommand (param_t **params, int *nparams)
 {
-	enum { IN_INITIAL, IN_WORD, IN_BETWEEN, IN_SCREEN, IN_QUOTES, IN_COMMENT, IN_ERROR } state = IN_INITIAL, previous;
-	int ch, len = 0;
+	enum { IN_INITIAL, IN_WORD, IN_BETWEEN, IN_ESCAPE, IN_QUOTES, IN_COMMENT, IN_ERROR, IN_SPECIAL } state = IN_INITIAL, previous;
+	int ch, len = 0, type;
 
 	*nparams = 0;
-	if ((*params = calloc (PARAM_COUNT, sizeof (char *))) == NULL)
-		fatalError ();
 
 	while (1)
 	{
 		ch = getchar ();
-		if (ch == EOF && state != IN_INITIAL)
+		if (ch == EOF && state == IN_INITIAL)
+			return RET_EOF;
+		else if (ch == EOF)
 			continue;
+
 		switch (state)
 		{
 			case IN_INITIAL:
-				if (ch == '\n' || ch == '#' || ch == EOF)
+				if (ch == '\n' || ch == '#')
 				{
-					addParam (params, nparams);
-					(*params)[0][0] = '\0';
-					if (ch == EOF)
-						return RET_EOF;
+					addParam (params, nparams, WT_WORD);
+					endString (&(*params)[*nparams - 1].word, 0);
+				}
+
+			case IN_SPECIAL:
+				if (state == IN_SPECIAL && (type = charType (ch, (*params)[*nparams - 1].type)))
+				{
+					state = IN_BETWEEN;
+					(*params)[*nparams - 1].type = type;
+					break;
 				}
 
 			case IN_BETWEEN:
@@ -266,8 +300,8 @@ result_t readCommand (char ***params, int *nparams)
 				else if (ch == '\\')
 				{
 					previous = IN_WORD;
-					state = IN_SCREEN;
-					addParam (params, nparams);
+					state = IN_ESCAPE;
+					addParam (params, nparams, WT_WORD);
 					len = 0;
 				}
 				else if (ch == '#')
@@ -275,74 +309,89 @@ result_t readCommand (char ***params, int *nparams)
 				else if (ch == '"')
 				{
 					state = IN_QUOTES;
-					addParam (params, nparams);
+					addParam (params, nparams, WT_WORD);
 					len = 0;
 				}
 				else if (isspace (ch))
 					;
+				else if ((type = charType (ch, 0)) > 0)
+				{
+					state = IN_SPECIAL;
+					addParam (params, nparams, type);
+				}
 				else
 				{
 					state = IN_WORD;
-					addParam (params, nparams);
-					len = 1;
-					(*params)[*nparams - 1][0] = ch;
+					addParam (params, nparams, WT_WORD);
+					len = 0;
+					addChar (&(*params)[*nparams - 1].word, &len, ch);
 				}
 				break;
 
 			case IN_WORD:
 				if (ch == '\n')
 				{
-					endString (*params + *nparams - 1, len);
+					endString (&(*params)[*nparams - 1].word, len);
 					return RET_OK;
 				}
 				else if (ch == '\\')
 				{
 					previous = IN_WORD;
-					state = IN_SCREEN;
+					state = IN_ESCAPE;
 				}
 				else if (ch == '#')
 				{
 					state = IN_COMMENT;
-					endString (*params + *nparams - 1, len);
+					endString (&(*params)[*nparams - 1].word, len);
 				}
 				else if (ch == '"')
-					state = IN_ERROR;
+				{
+					state = IN_QUOTES;
+					endString (&(*params)[*nparams - 1].word, len);
+					addParam (params, nparams, WT_WORD);
+					len = 0;
+				}
 				else if (isspace (ch))
 				{
 					state = IN_BETWEEN;
-					endString (*params + *nparams - 1, len);
+					endString (&(*params)[*nparams - 1].word, len);
+				}
+				else if ((type = charType (ch, 0)) > 0)
+				{
+					state = IN_SPECIAL;
+					endString (&(*params)[*nparams - 1].word, len);
+					addParam (params, nparams, type);
 				}
 				else
-					addChar (*params + *nparams - 1, &len, ch);
+					addChar (&(*params)[*nparams - 1].word, &len, ch);
 				break;
 
-			case IN_SCREEN:
+			case IN_ESCAPE:
+				state = previous;
 				if (ch == '\n')
-					return RET_ERR;
-				else if (ch == '\\' || ch == '#' || ch == '"')
-				{
-					state = previous;
-					addChar (*params + *nparams - 1, &len, ch);
-				}
+					putchar ('>');
 				else
-					state = IN_ERROR;
+					addChar (&(*params)[*nparams - 1].word, &len, ch);
 				break;
 
 			case IN_QUOTES:
 				if (ch == '\n')
-					return RET_ERR;
+				{
+					putchar ('>');
+					break;
+				}
 				else if (ch == '\\')
 				{
 					previous = IN_QUOTES;
-					state = IN_SCREEN;
+					state = IN_ESCAPE;
 				}
 				else if (ch == '"')
 				{
-					state = IN_WORD;
-					endString (*params + *nparams - 1, len);
+					state = IN_BETWEEN;
+					endString (&(*params)[*nparams - 1].word, len);
 				}
 				else
-					addChar (*params + *nparams - 1, &len, ch);
+					addChar (&(*params)[*nparams - 1].word, &len, ch);
 				break;
 
 			case IN_COMMENT:
@@ -359,16 +408,16 @@ result_t readCommand (char ***params, int *nparams)
 }
 
 /* Replaces environmental variables with their value */
-void placeEnv (char **params, int nparams)
+void placeEnv (param_t *params, int nparams)
 {
 	int i;
 
 	for (i = 0; i < nparams; ++i)
 	{
-		int len = strlen (params[i]), posp = 0, poss = 0, ch;
+		int len = strlen (params[i].word), posp = 0, poss = 0, ch;
 		char *s;
 
-		if (len < 2 || !strchr (params[i], '$'))
+		if (params[i].type != WT_WORD || len < 2 || !strchr (params[i].word, '$'))
 			continue;
 		if ((s = calloc (STR_SIZE, sizeof (char))) == NULL)
 			fatalError ();
@@ -378,20 +427,20 @@ void placeEnv (char **params, int nparams)
 			char *env;
 			int start;
 
-			while (posp < len && params[i][posp] != '$')
+			while (posp < len && params[i].word[posp] != '$')
 			{
 				checkStringLen (&s, poss);
-				s[poss++] = params[i][posp++];
+				s[poss++] = params[i].word[posp++];
 			}
 			if (posp == len)
 				break;
 			start = posp + 1;
 
-			while (++posp < len && isalpha ((int)params[i][posp]));
+			while (++posp < len && isalpha ((int)params[i].word[posp]));
 
-			ch = params[i][posp];
-			params[i][posp] = '\0';
-			if ((env = getenv (params[i] + start)) != NULL)
+			ch = params[i].word[posp];
+			params[i].word[posp] = '\0';
+			if ((env = getenv (params[i].word + start)) != NULL)
 			{
 				if ((poss + strlen (env) + 1) / STR_SIZE > poss / STR_SIZE)
 				{
@@ -403,25 +452,25 @@ void placeEnv (char **params, int nparams)
 				strcpy (s + poss, env);
 				poss += strlen (env);
 			}
-			params[i][posp] = ch;
+			params[i].word[posp] = ch;
 		}
 
 		endString (&s, poss);
-		free (params[i]);
-		params[i] = s;
+		free (params[i].word);
+		params[i].word = s;
 	}
 }
 
 /* Checks if command is internal that must be executed in the main process */
-int isInternal (char **command, int nparams)
+int isInternal (param_t *command, int nparams)
 {
 	int i;
 
-	if (strcmp (command[0], "cd") && strcmp (command[0], "exit") && strcmp (command[0], "jobs") && strcmp (command[0], "fg")
-	    && strcmp (command[0], "bg"))
+	if (strcmp (command[0].word, "cd") && strcmp (command[0].word, "exit") && strcmp (command[0].word, "jobs") && strcmp (command[0].word, "fg")
+	    && strcmp (command[0].word, "bg"))
 		return 0;
 	for (i = 1; i < nparams; ++i)
-		if (command[i][0] == '|')
+		if (command[i].word[0] == '|')
 			return 0;
 
 	return 1;
@@ -454,24 +503,32 @@ void checkBracket (char *s, int *cnt)   		/* When tagging is done, replace this 
 		--(*cnt);
 }
 
-int launchJobs (char **, int, job_t **, int *);
+int findDivider ()
+{
+
+}
+
+int launchJobs (param_t *, int, job_t **, int *);
 
 /* Executes a straightforward command (no pipes, no dividers - just command with parameters) */
-void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
+void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
 {
-	if (command[0][0] == '(') /* Launching subshell */
+	char **params;
+	int i;
+
+	if (command[0].type == WT_LBRACKET) /* Launching subshell */
 		exit (launchJobs (command + 1, nparams - 2, &jobs, &njobs));
 
-	if (!nparams || command[0][0] == '\0')
+	if (!nparams || command[0].word[0] == '\0')
 		exit (0);
-	if (!strcmp (command[0], "cd") || !strcmp (command[0], "exit") || !strcmp (command[0], "fg") || !strcmp (command[0], "bg"))
+	if (!strcmp (command[0].word, "cd") || !strcmp (command[0].word, "exit") || !strcmp (command[0].word, "fg") || !strcmp (command[0].word, "bg"))
 		exit (0);
-	if (!strcmp (command[0], "jobs"))
+	if (!strcmp (command[0].word, "jobs"))
 	{
 		showJobs (jobs, njobs, 1);
 		exit (0);
 	}
-	if (!strcmp (command[0], "pwd"))
+	if (!strcmp (command[0].word, "pwd"))
 	{
 		char *s = getcwd (NULL, 0);
 		if (s == NULL)
@@ -484,18 +541,21 @@ void executeCommand (char **command, int nparams, job_t *jobs, int njobs)
 		exit (0);
 	}
 
-	command[nparams] = NULL;
-	execvp (command[0], command);
-	perror (command[0]);
+	params = malloc (nparams * sizeof (char *));
+	for (i = 0; i < nparams; ++i)
+		params[i] = command[i].word;
+	params[nparams] = NULL;
+	execvp (params[0], params);
+	perror (params[0]);
 	exit (1);
 }
 
 /* Executes internal command */
-int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
+int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 {
-	if (!strcmp (command[0], "exit"))
+	if (!strcmp (command[0].word, "exit"))
 		exit (0);
-	else if (!strcmp (command[0], "cd"))
+	else if (!strcmp (command[0].word, "cd"))
 	{
 		if (nparams == 1)
 		{
@@ -503,18 +563,18 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 				perror ("xish");
 		}
 		else
-			if (chdir (command[1]))
+			if (chdir (command[1].word))
 				perror ("xish");
 	}
-	else if (!strcmp (command[0], "jobs"))
+	else if (!strcmp (command[0].word, "jobs"))
 		checkJobs (jobs, njobs, 1);
-	else if (!strcmp (command[0], "fg"))
+	else if (!strcmp (command[0].word, "fg"))
 	{
 		int n;
 		if (nparams == 1)
 			n = *njobs - 1;
 		else
-			n = atoi (command[1]) - 1;
+			n = atoi (command[1].word) - 1;
 		if (n < 0 || n >= *njobs)
 		{
 			puts ("xish: no such job");
@@ -525,7 +585,7 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 		else
 			deleteJob (jobs, njobs, n);
 	}
-	else if (!strcmp (command[0], "bg"))
+	else if (!strcmp (command[0].word, "bg"))
 	{
 		int n;
 		if (nparams == 1)
@@ -534,7 +594,7 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 			while (--n >= 0 && (*jobs)[n].status != ST_STOPPED);
 		}
 		else
-			n = atoi (command[1]) - 1;
+			n = atoi (command[1].word) - 1;
 		if (n < 0 || n >= *njobs)
 		{
 			puts ("No such job!");
@@ -548,19 +608,19 @@ int internalCommand (char **command, int nparams, job_t **jobs, int *njobs)
 }
 
 /* Organizes i/o redirection. Returns pid of last process in the pipeline, responsible for <, >, >> and | */
-pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
+pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 {
 	pid_t pid;
 	int begin = 0, divider = -1, bracketcnt = 0, j, cnt, pipes[2][2]={{0}}, fd;
-	char **command;
+	param_t *command;
 
 	while (begin < nparams)
 	{
 		cnt = 0;
 		while (++divider < nparams)
 		{
-			checkBracket (params[divider], &bracketcnt);
-			if (bracketcnt == 0 && !strcmp (params[divider], "|"))
+			checkBracket (params[divider].word, &bracketcnt);
+			if (bracketcnt == 0 && !strcmp (params[divider].word, "|"))
 				break;
 		}
 
@@ -569,17 +629,21 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 			if (pipes[0][0])
 				close (pipes[0][0]);
 			close (pipes[1][1]);
-			memcpy (pipes[0], pipes[1], sizeof (pipes[1]));
+			memcpy (pipes[0], pipes[1], sizeof (pipes[1])); 		/* rly? */
 		}
 		if (divider < nparams)
 			pipe (pipes[1]);
-		if ((command = calloc (divider - begin + 1, sizeof (char *))) == NULL)
-			return 0;
 
 		if ((pid = fork ()) < 0)
-			fatalError ();
+		{
+			perror ("xish");
+			return -1;
+		}
 		if (!pid)
 		{
+			if ((command = calloc (divider - begin + 1, sizeof (param_t))) == NULL)
+				fatalError ();
+
 			if (begin > 0)
 			{
 				dup2 (pipes[0][0], 0);
@@ -593,38 +657,33 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 			}
 
 			for (j = begin; j < divider; ++j)		/* Cut this, brackets check neccesary */
-				if (!strcmp (params[j], "<"))
+				if (!strcmp (params[j].word, "<"))
 				{
-					fd = open (params[j + 1], O_RDONLY);
+					fd = open (params[j + 1].word, O_RDONLY);
 					dup2 (fd, 0);
 					close (fd);
 					j++;
 				}
-				else if (!strcmp (params[j], ">"))
+				else if (!strcmp (params[j].word, ">"))
 				{
-					fd = open (params[j + 1], O_WRONLY | O_CREAT | O_TRUNC, 0666);
+					fd = open (params[j + 1].word, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 					dup2 (fd, 1);
 					close (fd);
 					j++;
 				}
-				else if (!strcmp (params[j], ">>"))
+				else if (!strcmp (params[j].word, ">>"))
 				{
-					fd = open (params[j + 1], O_WRONLY | O_CREAT | O_APPEND, 0666);
+					fd = open (params[j + 1].word, O_WRONLY | O_CREAT | O_APPEND, 0666);
 					dup2 (fd, 1);
 					close (fd);
 					j++;
 				}
 				else
-				{
-					command[cnt++] = calloc (strlen (params[j]) + 1, sizeof (char));
-					strcpy (command[cnt - 1], params[j]);
-				}
+					command[cnt++] = params[j];
 
-			command[cnt] = NULL;
 			executeCommand (command, cnt, jobs, njobs);
 		}
 
-		clearParams (&command, cnt);
 		begin = ++divider;
 	}
 
@@ -634,7 +693,7 @@ pid_t doCommands (char **params, int nparams, job_t *jobs, int njobs)
 }
 
 /* Executes one job in its own process group, MUST be run in fork, responsible for && and || */
-void controlJob (char **command, int nparams, job_t *jobs, int njobs)
+void controlJob (param_t *command, int nparams, job_t *jobs, int njobs)
 {
 	int begin = 0, divider = -1, bracketcnt = 0, status = 0, res = 0;
 	pid_t pid;
@@ -648,17 +707,18 @@ void controlJob (char **command, int nparams, job_t *jobs, int njobs)
 	{
 		while (++divider < nparams)
 		{
-			checkBracket (command[divider], &bracketcnt);
-			if (bracketcnt == 0 && (!strcmp (command[divider], "&&") || !strcmp (command[divider], "||")))
+			checkBracket (command[divider].word, &bracketcnt);
+			if (bracketcnt == 0 && (!strcmp (command[divider].word, "&&") || !strcmp (command[divider].word, "||")))
 				break;
 		}
-		if (begin > 0 && ((command[begin - 1][0] == '&' && res) || (command[begin - 1][0] == '|' && !res)))
+		if (begin > 0 && ((command[begin - 1].word[0] == '&' && res) || (command[begin - 1].word[0] == '|' && !res)))
 		{
 			begin = ++divider;
 			continue;
 		}
 
-		pid = doCommands (command + begin, divider - begin, jobs, njobs);
+		if ((pid = doCommands (command + begin, divider - begin, jobs, njobs)) < 0)
+			exit (1);
 		waitpid (pid, &status, 0);
 		res = WEXITSTATUS (status);
 
@@ -669,7 +729,7 @@ void controlJob (char **command, int nparams, job_t *jobs, int njobs)
 }
 
 /* Launches background and foreground jobs, responsible for ; and & */
-int launchJobs (char **params, int nparams, job_t **jobs, int *njobs)
+int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 {
 	int begin = 0, divider = -1, bracketcnt = 0, isforeground, exitstatus;
 	pid_t pid;
@@ -682,11 +742,11 @@ int launchJobs (char **params, int nparams, job_t **jobs, int *njobs)
 	{
 		while (++divider < nparams)
 		{
-			checkBracket (params[divider], &bracketcnt);
-			if (bracketcnt == 0 && (!strcmp (params[divider], "&") || !strcmp (params[divider], ";")))
+			checkBracket (params[divider].word, &bracketcnt);
+			if (bracketcnt == 0 && (!strcmp (params[divider].word, "&") || !strcmp (params[divider].word, ";")))
 				break;
 		}
-		isforeground = divider == nparams || params[divider][0] == ';';
+		isforeground = divider == nparams || params[divider].word[0] == ';';
 
 		if (isforeground && isInternal (params + begin, divider - begin))  /* Needs to be changed maybe? */
 		{
@@ -696,7 +756,10 @@ int launchJobs (char **params, int nparams, job_t **jobs, int *njobs)
 		}
 
 		if ((pid = fork ()) < 0)
-			fatalError ();
+		{
+			perror ("xish");
+			return 1;
+		}
 		else if (!pid)
 			controlJob (params + begin, divider - begin, *jobs, *njobs);
 		setpgid (pid, pid);
@@ -757,7 +820,12 @@ void showPrompt ()
 {
 	char hostname[HOST_NAME_MAX], *cwd = getcwd (NULL, 0);
 	if (gethostname (hostname, HOST_NAME_MAX) || cwd == NULL)
+	{
 		printf (DFL_PROMPT);
+		if (cwd != NULL)
+			free (cwd);
+		return;
+	}
 	printf ("%s@%s %s $ ", getlogin (), hostname, cwd);
 	free (cwd);
 }
@@ -766,7 +834,7 @@ void showPrompt ()
 int main ()
 {
 	int nparams, njobs = 0;
-	char **params = NULL;
+	param_t *params = NULL;
 	job_t *jobs = NULL;
 	result_t ret;
 
@@ -793,7 +861,7 @@ int main ()
 		showPrompt ();
 	}
 
-	puts ('\n');
+	putchar ('\n');
 	clearParams (&params, nparams);
 	clearJobs (&jobs, njobs);
 
