@@ -37,6 +37,7 @@ typedef struct
 	word_t type;
 } param_t;
 
+FILE *file;
 
 /* Terminates program */
 void fatalError ()
@@ -121,6 +122,37 @@ void clearParams (param_t **params, int nparams)
 	*params = NULL;
 }
 
+void printParams (param_t *params, int nparams)
+{
+	int i;
+	for (i = 0; i < nparams; i++)
+		if (params[i].type == WT_WORD)
+			printf ("%s ", params[i].word);
+		else
+			printf ("%d ", params[i].type);
+	putchar ('\n');
+}
+
+char *charDivider (word_t type, char *s)
+{
+	s[1] = '\0';
+	switch (type)
+	{
+		case WT_WORD: 		  break;
+		case WT_LBRACKET:	  s[0] = '('; break;
+		case WT_RBRACKET:	  s[0] = ')'; break;
+		case WT_FILERD:		  s[0] = '<'; break;
+		case WT_FILEWRTRUNC:  s[0] = '>'; break;
+		case WT_FILEWRAPPEND: s[0] = '>'; s[1] = '>'; s[2] = '\0'; break;
+		case WT_BACKGROUND:	  s[0] = '&'; break;
+		case WT_AND:		  s[0] = '&'; s[1] = '&'; s[2] = '\0'; break;
+		case WT_OR:			  s[0] = '|'; s[1] = '|'; s[2] = '\0'; break;
+		case WT_SEMICOLON:	  s[0] = ';'; break;
+		case WT_PIPE:		  s[0] = '|'; break;
+	}
+	return s;
+}
+
 /* Adds new entry to jobs array, initializes the structure with given data */
 void addJob (job_t **jobs, int *njobs, param_t *command, int nparams, int pgid, status_t status)
 {
@@ -136,14 +168,20 @@ void addJob (job_t **jobs, int *njobs, param_t *command, int nparams, int pgid, 
 	ptr->status = status;
 
 	for (i = 0; i < nparams; ++i)
-		len += strlen (command[i].word);
+		if (command[i].type == WT_WORD)
+			len += strlen (command[i].word);
+		else
+			len += 2;
 	if ((ptr->job = calloc (len + 1, sizeof (char))) == NULL)
 		fatalError ();
 
 	len = 0;
 	for (i = 0; i < nparams; ++i)
 	{
-		strcpy (ptr->job + len, command[i].word);
+		if (command[i].type == WT_WORD)
+			strcpy (ptr->job + len, command[i].word);
+		else
+			charDivider (command[i].type, ptr->job + len);
 		len = strlen (ptr->job);
 		ptr->job[len] = ' ';
 		ptr->job[++len] = '\0';
@@ -414,11 +452,13 @@ void placeEnv (param_t *params, int nparams)
 
 	for (i = 0; i < nparams; ++i)
 	{
-		int len = strlen (params[i].word), posp = 0, poss = 0, ch;
+		int len, posp = 0, poss = 0, ch;
 		char *s;
 
 		if (params[i].type != WT_WORD || len < 2 || !strchr (params[i].word, '$'))
 			continue;
+
+		len = strlen (params[i].word);
 		if ((s = calloc (STR_SIZE, sizeof (char))) == NULL)
 			fatalError ();
 
@@ -494,18 +534,22 @@ int waitProcessGroup (pid_t pgid, int *status)
 	return WIFSTOPPED (st);
 }
 
-/* Checks if is an opening/closing bracket, changes cnt accordingly */
-void checkBracket (char *s, int *cnt)   		/* When tagging is done, replace this with findDivider */
+/* Finds two given diveders in range from begin to array end */
+int findDivider (param_t *params, int nparams, int begin, word_t div1, word_t div2)
 {
-	if (!strcmp (s, "("))
-		++(*cnt);
-	else if (!strcmp (s, ")"))
-		--(*cnt);
-}
+	int divider = begin - 1, bracketcnt = 0;
 
-int findDivider ()
-{
+	while (++divider < nparams)
+	{
+		if (params[divider].type == WT_LBRACKET)
+			++bracketcnt;
+		else if (params[divider].type == WT_RBRACKET)
+			--bracketcnt;
+		else if (bracketcnt == 0 && (params[divider].type == div1 || params[divider].type == div2))
+			break;
+	}
 
+	return divider;
 }
 
 int launchJobs (param_t *, int, job_t **, int *);
@@ -528,6 +572,12 @@ void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
 		showJobs (jobs, njobs, 1);
 		exit (0);
 	}
+	if (!strcmp (command[0].word, "battlefield"))
+	{
+		puts ("Hi guys, xiluscap here! Don't press CTR-C yet!");
+		system ("mpg123 -qm resources/s.mp3");
+		exit (0);
+	}
 	if (!strcmp (command[0].word, "pwd"))
 	{
 		char *s = getcwd (NULL, 0);
@@ -541,7 +591,7 @@ void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
 		exit (0);
 	}
 
-	params = malloc (nparams * sizeof (char *));
+	params = malloc ((nparams + 1) * sizeof (char *));
 	for (i = 0; i < nparams; ++i)
 		params[i] = command[i].word;
 	params[nparams] = NULL;
@@ -611,25 +661,19 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 {
 	pid_t pid;
-	int begin = 0, divider = -1, bracketcnt = 0, j, cnt, pipes[2][2]={{0}}, fd;
+	int begin = 0, divider, bracketcnt = 0, j, cnt, pipes[2][2]={{0}}, fd;
 	param_t *command;
 
 	while (begin < nparams)
 	{
-		cnt = 0;
-		while (++divider < nparams)
-		{
-			checkBracket (params[divider].word, &bracketcnt);
-			if (bracketcnt == 0 && !strcmp (params[divider].word, "|"))
-				break;
-		}
+		divider = findDivider (params, nparams, begin, WT_PIPE, WT_PIPE);
 
 		if (begin > 0)
 		{
 			if (pipes[0][0])
 				close (pipes[0][0]);
 			close (pipes[1][1]);
-			memcpy (pipes[0], pipes[1], sizeof (pipes[1])); 		/* rly? */
+			pipes[0][0] = pipes[1][0];
 		}
 		if (divider < nparams)
 			pipe (pipes[1]);
@@ -656,35 +700,43 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 				close (pipes[1][1]);
 			}
 
-			for (j = begin; j < divider; ++j)		/* Cut this, brackets check neccesary */
-				if (!strcmp (params[j].word, "<"))
+			bracketcnt = 0;
+			cnt = 0;
+			for (j = begin; j < divider; ++j)
+				if (bracketcnt == 0 &&
+						(params[j].type == WT_FILEWRTRUNC || params[j].type == WT_FILERD || params[j].type == WT_FILEWRAPPEND))
 				{
-					fd = open (params[j + 1].word, O_RDONLY);
-					dup2 (fd, 0);
+					if (params[j].type == WT_FILEWRTRUNC)
+					{
+						fd = open (params[j + 1].word, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+						dup2 (fd, 1);
+					}
+					else if (params[j].type == WT_FILEWRAPPEND)
+					{
+						fd = open (params[j + 1].word, O_WRONLY | O_CREAT | O_APPEND, 0666);
+						dup2 (fd, 1);
+					}
+					else
+					{
+						fd = open (params[j + 1].word, O_RDONLY);
+						dup2 (fd, 0);
+					}
 					close (fd);
-					j++;
-				}
-				else if (!strcmp (params[j].word, ">"))
-				{
-					fd = open (params[j + 1].word, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-					dup2 (fd, 1);
-					close (fd);
-					j++;
-				}
-				else if (!strcmp (params[j].word, ">>"))
-				{
-					fd = open (params[j + 1].word, O_WRONLY | O_CREAT | O_APPEND, 0666);
-					dup2 (fd, 1);
-					close (fd);
-					j++;
+					++j;
 				}
 				else
+				{
+					if (params[j].type == WT_LBRACKET)
+						++bracketcnt;
+					else if (params[j].type == WT_RBRACKET)
+						--bracketcnt;
 					command[cnt++] = params[j];
+				}
 
 			executeCommand (command, cnt, jobs, njobs);
 		}
 
-		begin = ++divider;
+		begin = divider + 1;
 	}
 
 	if (pipes[0][0])
@@ -695,7 +747,7 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 /* Executes one job in its own process group, MUST be run in fork, responsible for && and || */
 void controlJob (param_t *command, int nparams, job_t *jobs, int njobs)
 {
-	int begin = 0, divider = -1, bracketcnt = 0, status = 0, res = 0;
+	int begin = 0, divider, status = 0, res = 0;
 	pid_t pid;
 	setpgid (0, 0);
 
@@ -705,15 +757,10 @@ void controlJob (param_t *command, int nparams, job_t *jobs, int njobs)
 
 	while (begin < nparams)
 	{
-		while (++divider < nparams)
+		divider = findDivider (command, nparams, begin, WT_AND, WT_OR);
+		if (begin > 0 && ((command[begin - 1].type == WT_AND && res) || (command[begin - 1].type == WT_OR && !res)))
 		{
-			checkBracket (command[divider].word, &bracketcnt);
-			if (bracketcnt == 0 && (!strcmp (command[divider].word, "&&") || !strcmp (command[divider].word, "||")))
-				break;
-		}
-		if (begin > 0 && ((command[begin - 1].word[0] == '&' && res) || (command[begin - 1].word[0] == '|' && !res)))
-		{
-			begin = ++divider;
+			begin = divider + 1;
 			continue;
 		}
 
@@ -722,7 +769,7 @@ void controlJob (param_t *command, int nparams, job_t *jobs, int njobs)
 		waitpid (pid, &status, 0);
 		res = WEXITSTATUS (status);
 
-		begin = ++divider;
+		begin = divider + 1;
 	}
 
 	exit (res);
@@ -731,7 +778,7 @@ void controlJob (param_t *command, int nparams, job_t *jobs, int njobs)
 /* Launches background and foreground jobs, responsible for ; and & */
 int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 {
-	int begin = 0, divider = -1, bracketcnt = 0, isforeground, exitstatus;
+	int begin = 0, divider, isforeground, exitstatus;
 	pid_t pid;
 
 	signal (SIGINT, SIG_IGN);
@@ -740,18 +787,13 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 
 	while (begin < nparams)		/* Single & and ; must be caught before this! */
 	{
-		while (++divider < nparams)
-		{
-			checkBracket (params[divider].word, &bracketcnt);
-			if (bracketcnt == 0 && (!strcmp (params[divider].word, "&") || !strcmp (params[divider].word, ";")))
-				break;
-		}
-		isforeground = divider == nparams || params[divider].word[0] == ';';
+		divider = findDivider (params, nparams, begin, WT_BACKGROUND, WT_SEMICOLON);
+		isforeground = divider == nparams || params[divider].type == WT_SEMICOLON;
 
 		if (isforeground && isInternal (params + begin, divider - begin))  /* Needs to be changed maybe? */
 		{
 			internalCommand (params + begin, divider - begin, jobs, njobs);
-			begin = ++divider;
+			begin = divider + 1;
 			continue;
 		}
 
@@ -775,7 +817,7 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 			exitstatus = 0;
 		}
 
-		begin = ++divider;
+		begin = divider + 1;
 	}
 
 	return exitstatus;
