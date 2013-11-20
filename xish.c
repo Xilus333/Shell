@@ -17,7 +17,6 @@
  * -New line after CTR-C?
  * -Move checkJobs, so "jobs" could be redirected?
  * -Rework internal command handling
- * -Normal syntax check
  */
 
 typedef enum { RET_OK, RET_ERR, RET_EOF } result_t;
@@ -122,9 +121,11 @@ void clearParams (param_t **params, int nparams)
 	*params = NULL;
 }
 
+/* Prints params array. For testing puroses only */
 void printParams (param_t *params, int nparams)
 {
 	int i;
+	printf ("%d params: ", nparams);
 	for (i = 0; i < nparams; i++)
 		if (params[i].type == WT_WORD)
 			printf ("%s ", params[i].word);
@@ -506,6 +507,8 @@ int isInternal (param_t *command, int nparams)
 {
 	int i;
 
+	if (command[0].type != WT_WORD)
+		return 0;
 	if (strcmp (command[0].word, "cd") && strcmp (command[0].word, "exit") && strcmp (command[0].word, "jobs") && strcmp (command[0].word, "fg")
 	    && strcmp (command[0].word, "bg"))
 		return 0;
@@ -575,7 +578,6 @@ void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
 	if (!strcmp (command[0].word, "battlefield"))
 	{
 		puts ("Hi guys, xiluscap here! Don't press CTR-C yet!");
-		system ("mpg123 -qm resources/s.mp3");
 		exit (0);
 	}
 	if (!strcmp (command[0].word, "pwd"))
@@ -785,7 +787,7 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 	signal (SIGTTOU, SIG_IGN);
 	signal (SIGTSTP, SIG_IGN);
 
-	while (begin < nparams)		/* Single & and ; must be caught before this! */
+	while (begin < nparams)
 	{
 		divider = findDivider (params, nparams, begin, WT_BACKGROUND, WT_SEMICOLON);
 		isforeground = divider == nparams || params[divider].type == WT_SEMICOLON;
@@ -821,6 +823,50 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 	}
 
 	return exitstatus;
+}
+
+/* Checks if syntax is correct. Returns 1 on correct syntax */
+int checkSyntax (param_t *params, int nparams)
+{
+	int i, bracketcnt = 0, nospecial = 1, noend = 1;
+	char divider[3];
+
+	for (i = 0; i < nparams; ++i)
+	{
+		if (params[i].type == WT_LBRACKET)
+		{
+			++bracketcnt;
+			nospecial = noend = 1;
+		}
+		else if (params[i].type == WT_RBRACKET)
+		{
+			if (noend || --bracketcnt < 0)
+				break;
+			nospecial = noend = 0;
+		}
+		else if (nospecial && params[i].type != WT_WORD)
+			break;
+		else if (params[i].type == WT_BACKGROUND)
+		{
+			nospecial = 1;
+			noend = 0;
+		}
+		else if (params[i].type != WT_WORD)
+			nospecial = noend = 1;
+		else
+			nospecial = noend = 0;
+	}
+
+	if (i < nparams || bracketcnt > 0 || noend)
+	{
+		if (i < nparams)
+			printf ("xish: syntax error near %s\n", charDivider (params[i].type, divider));
+		else
+			printf ("xish: unexpected end of file\n");
+		return 0;
+	}
+
+	return 1;
 }
 
 /* Sets some environmental variables for later use */
@@ -892,7 +938,7 @@ int main ()
 	{
 		if (ret == RET_ERR)
 			puts ("xish: wrong command format");
-		else
+		else if (checkSyntax (params, nparams))
 		{
 			placeEnv (params, nparams);
 			launchJobs (params, nparams, &jobs, &njobs);

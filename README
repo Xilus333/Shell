@@ -3,6 +3,6 @@ xish is a xilus's linux shell.
 What is it capable of at the moment:
 -normal command execution
 -i/o redirection
--full job control (CTRL+Z, fg, bg. jobs, &)
+-full job control (CTRL+Z, fg, bg, jobs, &)
 -brackets create subshell
 -the following separators work: &&, ||, &, |, ;, >>, >, <, (, )
