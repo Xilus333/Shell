@@ -13,10 +13,13 @@
 #define PARAM_COUNT 5
 #define DFL_PROMPT "$ "
 
+int issubshell = 0;
+
 /* Todo:
  * -New line after CTR-C?
  * -Move checkJobs, so "jobs" could be redirected?
  * -Rework internal command handling
+ * -Rework error handling
  */
 
 typedef enum { RET_OK, RET_ERR, RET_EOF } result_t;
@@ -114,8 +117,7 @@ void clearParams (param_t **params, int nparams)
 	if (params == NULL)
 		return;
 	for (i = 0; i < nparams; ++i)
-		if ((*params)[i].type == WT_WORD)
-			free ((*params)[i].word);
+		free ((*params)[i].word);
 	free (*params);
 
 	*params = NULL;
@@ -132,26 +134,6 @@ void printParams (param_t *params, int nparams)
 		else
 			printf ("%d ", params[i].type);
 	putchar ('\n');
-}
-
-char *charDivider (word_t type, char *s)
-{
-	s[1] = '\0';
-	switch (type)
-	{
-		case WT_WORD: 		  break;
-		case WT_LBRACKET:	  s[0] = '('; break;
-		case WT_RBRACKET:	  s[0] = ')'; break;
-		case WT_FILERD:		  s[0] = '<'; break;
-		case WT_FILEWRTRUNC:  s[0] = '>'; break;
-		case WT_FILEWRAPPEND: s[0] = '>'; s[1] = '>'; s[2] = '\0'; break;
-		case WT_BACKGROUND:	  s[0] = '&'; break;
-		case WT_AND:		  s[0] = '&'; s[1] = '&'; s[2] = '\0'; break;
-		case WT_OR:			  s[0] = '|'; s[1] = '|'; s[2] = '\0'; break;
-		case WT_SEMICOLON:	  s[0] = ';'; break;
-		case WT_PIPE:		  s[0] = '|'; break;
-	}
-	return s;
 }
 
 /* Adds new entry to jobs array, initializes the structure with given data */
@@ -179,10 +161,7 @@ void addJob (job_t **jobs, int *njobs, param_t *command, int nparams, int pgid, 
 	len = 0;
 	for (i = 0; i < nparams; ++i)
 	{
-		if (command[i].type == WT_WORD)
-			strcpy (ptr->job + len, command[i].word);
-		else
-			charDivider (command[i].type, ptr->job + len);
+		strcpy (ptr->job + len, command[i].word);
 		len = strlen (ptr->job);
 		ptr->job[len] = ' ';
 		ptr->job[++len] = '\0';
@@ -330,6 +309,8 @@ result_t readCommand (param_t **params, int *nparams)
 				{
 					state = IN_BETWEEN;
 					(*params)[*nparams - 1].type = type;
+					addChar (&(*params)[*nparams - 1].word, &len, ch);
+					endString (&(*params)[*nparams - 1].word, 2);
 					break;
 				}
 
@@ -357,6 +338,9 @@ result_t readCommand (param_t **params, int *nparams)
 				{
 					state = IN_SPECIAL;
 					addParam (params, nparams, type);
+					len = 0;
+					addChar (&(*params)[*nparams - 1].word, &len, ch);
+					endString (&(*params)[*nparams - 1].word, 1);
 				}
 				else
 				{
@@ -400,6 +384,9 @@ result_t readCommand (param_t **params, int *nparams)
 					state = IN_SPECIAL;
 					endString (&(*params)[*nparams - 1].word, len);
 					addParam (params, nparams, type);
+					len = 0;
+					addChar (&(*params)[*nparams - 1].word, &len, ch);
+					endString (&(*params)[*nparams - 1].word, 1);
 				}
 				else
 					addChar (&(*params)[*nparams - 1].word, &len, ch);
@@ -519,20 +506,23 @@ int isInternal (param_t *command, int nparams)
 	return 1;
 }
 
-/* Shifts process group to foreground and waits for it to finish. Returns 1 if the process was stopped and 0 if it has termeniated */
-int waitProcessGroup (pid_t pgid, int *status)
+/* Shifts process group of pid process to foreground and waits for all the processes
+   to finish. Returns 1 if the process was stopped and 0 if it has termeniated */
+int waitProcessGroup (pid_t lastpid, int pgid, int *status)
 {
-	int st;
+	int st, pidstatus = 0, pid;
 
 	tcsetpgrp (STDIN_FILENO, pgid);
 	kill (-pgid, SIGCONT);
-	waitpid (pgid, &st, WUNTRACED);
+	while ((pid = waitpid (-pgid, &st, WUNTRACED)) != -1 && !WIFSTOPPED (st))
+		if (pid == lastpid)
+			pidstatus = st;
 	tcsetpgrp (STDIN_FILENO, getpid ());
 
 	if (WIFSTOPPED (st))
 		putchar ('\n');
 	if (status != NULL)
-		*status = WEXITSTATUS (st);
+		*status = WEXITSTATUS (pidstatus);
 
 	return WIFSTOPPED (st);
 }
@@ -555,6 +545,7 @@ int findDivider (param_t *params, int nparams, int begin, word_t div1, word_t di
 	return divider;
 }
 
+/* For recursion */
 int launchJobs (param_t *, int, job_t **, int *);
 
 /* Executes a straightforward command (no pipes, no dividers - just command with parameters) */
@@ -563,8 +554,15 @@ void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
 	char **params;
 	int i;
 
+	signal (SIGINT, SIG_DFL);
+	signal (SIGTSTP, SIG_DFL);
+	signal (SIGTTOU, SIG_DFL);
+
 	if (command[0].type == WT_LBRACKET) /* Launching subshell */
+	{
+		issubshell = 1;
 		exit (launchJobs (command + 1, nparams - 2, &jobs, &njobs));
+	}
 
 	if (!nparams || command[0].word[0] == '\0')
 		exit (0);
@@ -577,7 +575,7 @@ void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
 	}
 	if (!strcmp (command[0].word, "battlefield"))
 	{
-		puts ("Hi guys, xiluscap here! Don't press CTR-C yet!");
+		puts ("Hi guys, TheWorldsEnd here!");
 		exit (0);
 	}
 	if (!strcmp (command[0].word, "pwd"))
@@ -620,7 +618,7 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 	}
 	else if (!strcmp (command[0].word, "jobs"))
 		checkJobs (jobs, njobs, 1);
-	else if (!strcmp (command[0].word, "fg"))
+	else if (!strcmp (command[0].word, "fg")) /* Change!*/
 	{
 		int n;
 		if (nparams == 1)
@@ -632,7 +630,7 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 			puts ("xish: no such job");
 			return 0;
 		}
-		if (waitProcessGroup ((*jobs)[n].pgid, NULL))
+		if (waitProcessGroup (0, (*jobs)[n].pgid, NULL))
 			(*jobs)[n].status = ST_JUSTSTP;
 		else
 			deleteJob (jobs, njobs, n);
@@ -649,7 +647,7 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 			n = atoi (command[1].word) - 1;
 		if (n < 0 || n >= *njobs)
 		{
-			puts ("No such job!");
+			puts ("xish: no such job!");
 			return 0;
 		}
 		kill (-(*jobs)[n].pgid, SIGCONT);
@@ -662,7 +660,7 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 /* Organizes i/o redirection. Returns pid of last process in the pipeline, responsible for <, >, >> and | */
 pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 {
-	pid_t pid;
+	pid_t pgid, pid;
 	int begin = 0, divider, bracketcnt = 0, j, cnt, pipes[2][2]={{0}}, fd;
 	param_t *command;
 
@@ -681,12 +679,12 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 			pipe (pipes[1]);
 
 		if ((pid = fork ()) < 0)
-		{
-			perror ("xish");
-			return -1;
-		}
+			fatalError ();
+		if (begin == 0)
+			pgid = pid;
 		if (!pid)
 		{
+			setpgid (0, pgid);
 			if ((command = calloc (divider - begin + 1, sizeof (param_t))) == NULL)
 				fatalError ();
 
@@ -738,6 +736,7 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 			executeCommand (command, cnt, jobs, njobs);
 		}
 
+		setpgid (pid, pgid);
 		begin = divider + 1;
 	}
 
@@ -746,51 +745,52 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 	return pid;
 }
 
-/* Executes one job in its own process group, MUST be run in fork, responsible for && and || */
-void controlJob (param_t *command, int nparams, job_t *jobs, int njobs)
+/* Executes one job in its own process group, responsible for && and || */
+int controlJob (param_t *params, int nparams, int isforeground, job_t **jobs, int *njobs)
 {
-	int begin = 0, divider, status = 0, res = 0;
-	pid_t pid;
-	setpgid (0, 0);
-
-	signal (SIGINT,  SIG_DFL);
-	signal (SIGTTOU, SIG_DFL);
-	signal (SIGTSTP, SIG_DFL);
+	int begin = 0, divider, exitstatus = 0;
+	pid_t pid, pgid;
 
 	while (begin < nparams)
 	{
-		divider = findDivider (command, nparams, begin, WT_AND, WT_OR);
-		if (begin > 0 && ((command[begin - 1].type == WT_AND && res) || (command[begin - 1].type == WT_OR && !res)))
+		divider = findDivider (params, nparams, begin, WT_AND, WT_OR);
+		if (begin > 0 && ((params[begin - 1].type == WT_AND && exitstatus) || (params[begin - 1].type == WT_OR && !exitstatus)))
 		{
 			begin = divider + 1;
 			continue;
 		}
 
-		if ((pid = doCommands (command + begin, divider - begin, jobs, njobs)) < 0)
-			exit (1);
-		waitpid (pid, &status, 0);
-		res = WEXITSTATUS (status);
+		if ((pid = doCommands (params + begin, divider - begin, *jobs, *njobs)) < 0)
+			fatalError ();
+		pgid = getpgid (pid);
+		if (isforeground)
+		{
+			if (waitProcessGroup (pid, pgid, &exitstatus)) /* Check if process stopped is non-zero */
+				addJob (jobs, njobs, params + begin, divider - begin, pgid, ST_JUSTSTP);
+		}
+		else
+			addJob (jobs, njobs, params + begin, divider - begin, pgid, ST_RUNNING);
 
 		begin = divider + 1;
 	}
 
-	exit (res);
+	return exitstatus;
 }
 
 /* Launches background and foreground jobs, responsible for ; and & */
 int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 {
-	int begin = 0, divider, isforeground, exitstatus;
+	int begin = 0, divider, isforeground, needcontrol, exitstatus;
 	pid_t pid;
 
-	signal (SIGINT, SIG_IGN);
-	signal (SIGTTOU, SIG_IGN);
-	signal (SIGTSTP, SIG_IGN);
+	if (issubshell)
+		signal (SIGTTOU, SIG_IGN);
 
 	while (begin < nparams)
 	{
 		divider = findDivider (params, nparams, begin, WT_BACKGROUND, WT_SEMICOLON);
 		isforeground = divider == nparams || params[divider].type == WT_SEMICOLON;
+		needcontrol = !isforeground && findDivider (params + begin, divider - begin, 0, WT_AND, WT_OR) < divider - begin;
 
 		if (isforeground && isInternal (params + begin, divider - begin))  /* Needs to be changed maybe? */
 		{
@@ -799,25 +799,23 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 			continue;
 		}
 
-		if ((pid = fork ()) < 0)
+		if (needcontrol)
 		{
-			perror ("xish");
-			return 1;
-		}
-		else if (!pid)
-			controlJob (params + begin, divider - begin, *jobs, *njobs);
-		setpgid (pid, pid);
+			if ((pid = fork ()) < 0)
+				fatalError ();
+			if (!pid)
+			{
+				setpgid (0, 0);
+				issubshell = 1;
+				launchJobs (params, nparams - 1, jobs, njobs);
+				exit (0);
+			}
 
-		if (isforeground)
-		{
-			if (waitProcessGroup (pid, &exitstatus))
-				addJob (jobs, njobs, params + begin, divider - begin, pid, ST_JUSTSTP);
+			setpgid (pid, pid);
+			addJob (jobs, njobs, params + begin, divider - begin, pid, ST_RUNNING);
 		}
 		else
-		{
-			addJob (jobs, njobs, params + begin, divider - begin, pid, ST_RUNNING);
-			exitstatus = 0;
-		}
+			exitstatus = controlJob (params + begin, divider - begin, isforeground, jobs, njobs);
 
 		begin = divider + 1;
 	}
@@ -829,7 +827,6 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 int checkSyntax (param_t *params, int nparams)
 {
 	int i, bracketcnt = 0, nospecial = 1, noend = 1;
-	char divider[3];
 
 	for (i = 0; i < nparams; ++i)
 	{
@@ -860,7 +857,7 @@ int checkSyntax (param_t *params, int nparams)
 	if (i < nparams || bracketcnt > 0 || noend)
 	{
 		if (i < nparams)
-			printf ("xish: syntax error near %s\n", charDivider (params[i].type, divider));
+			printf ("xish: syntax error near %s\n", params[i].word);
 		else
 			printf ("xish: unexpected end of file\n");
 		return 0;
@@ -927,8 +924,8 @@ int main ()
 	result_t ret;
 
 	signal (SIGINT, SIG_IGN);
-	signal (SIGTTOU, SIG_IGN);
 	signal (SIGTSTP, SIG_IGN);
+	signal (SIGTTOU, SIG_IGN);
 
 	if (doInit ())
 		return 1;
