@@ -3,6 +3,7 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -142,6 +143,9 @@ void addJob (job_t **jobs, int *njobs, param_t *command, int nparams, int pgid, 
 	int len = nparams + 1, i;
 	job_t *ptr;
 
+	if (issubshell)
+		fprintf (stderr, "xish: you should not be here!\n");
+
 	if ((ptr = realloc (*jobs, (*njobs + 1) * sizeof (job_t))) == NULL)
 		fatalError ();
 
@@ -177,6 +181,9 @@ void deleteJob (job_t **jobs, int *njobs, int n)
 {
 	int i;
 	job_t *ptr;
+
+	if (issubshell)
+		fprintf (stderr, "xish: you should not be here!\n");
 
 	free ((*jobs)[n].job);
 	(*jobs)[n].job = NULL;
@@ -215,7 +222,7 @@ void showJobs (job_t *jobs, int njobs, int fullog)
 	for (i = 0; i < njobs; ++i)
 	{
 		if (jobs[i].status == ST_NONE || (!fullog && (jobs[i].status == ST_RUNNING || jobs[i].status == ST_STOPPED)))
-		    continue;
+			continue;
 		switch (jobs[i].status)
 		{
 			case ST_NONE:	 break;
@@ -510,14 +517,19 @@ int isInternal (param_t *command, int nparams)
    to finish. Returns 1 if the process was stopped and 0 if it has termeniated */
 int waitProcessGroup (pid_t lastpid, int pgid, int *status)
 {
-	int st, pidstatus = 0, pid;
+	int st, pidstatus = 0, tracemode = 0;
+	pid_t pid;
+	if (!issubshell)
+		tracemode = WUNTRACED;
 
-	tcsetpgrp (STDIN_FILENO, pgid);
+	if (!issubshell)
+		tcsetpgrp (STDIN_FILENO, pgid);
 	kill (-pgid, SIGCONT);
-	while ((pid = waitpid (-pgid, &st, WUNTRACED)) != -1 && !WIFSTOPPED (st))
+	while ((pid = waitpid (-pgid, &st, tracemode)) != (pid_t)-1 && !WIFSTOPPED (st))
 		if (pid == lastpid)
 			pidstatus = st;
-	tcsetpgrp (STDIN_FILENO, getpid ());
+	if (!issubshell)
+		tcsetpgrp (STDIN_FILENO, getpid ());
 
 	if (WIFSTOPPED (st))
 		putchar ('\n');
@@ -554,7 +566,7 @@ void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
 	char **params;
 	int i;
 
-	signal (SIGINT, SIG_DFL);
+	signal (SIGINT,  SIG_DFL);
 	signal (SIGTSTP, SIG_DFL);
 	signal (SIGTTOU, SIG_DFL);
 
@@ -596,6 +608,7 @@ void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
 		params[i] = command[i].word;
 	params[nparams] = NULL;
 	execvp (params[0], params);
+	fprintf(stderr, "xish: ");
 	perror (params[0]);
 	exit (1);
 }
@@ -618,9 +631,15 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 	}
 	else if (!strcmp (command[0].word, "jobs"))
 		checkJobs (jobs, njobs, 1);
-	else if (!strcmp (command[0].word, "fg")) /* Change!*/
+	else if (!strcmp (command[0].word, "fg"))
 	{
 		int n;
+		if (issubshell)
+		{
+			fprintf(stderr, "xish: fg: no job control\n");
+			return 1;
+		}
+
 		if (nparams == 1)
 			n = *njobs - 1;
 		else
@@ -628,7 +647,7 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 		if (n < 0 || n >= *njobs)
 		{
 			puts ("xish: no such job");
-			return 0;
+			return 1;
 		}
 		if (waitProcessGroup (0, (*jobs)[n].pgid, NULL))
 			(*jobs)[n].status = ST_JUSTSTP;
@@ -638,6 +657,12 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 	else if (!strcmp (command[0].word, "bg"))
 	{
 		int n;
+		if (issubshell)
+		{
+			fprintf(stderr, "xish: bg: no job control\n");
+			return 1;
+		}
+
 		if (nparams == 1)
 		{
 			n = *njobs;
@@ -647,8 +672,8 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 			n = atoi (command[1].word) - 1;
 		if (n < 0 || n >= *njobs)
 		{
-			puts ("xish: no such job!");
-			return 0;
+			fprintf(stderr, "xish: no such job\n");
+			return 1;
 		}
 		kill (-(*jobs)[n].pgid, SIGCONT);
 		printf ("[%d] %s\n", n + 1, (*jobs)[n].job);
@@ -660,7 +685,7 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 /* Organizes i/o redirection. Returns pid of last process in the pipeline, responsible for <, >, >> and | */
 pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 {
-	pid_t pgid, pid;
+	pid_t pgid = getpgid (0), pid;
 	int begin = 0, divider, bracketcnt = 0, j, cnt, pipes[2][2]={{0}}, fd;
 	param_t *command;
 
@@ -680,7 +705,7 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 
 		if ((pid = fork ()) < 0)
 			fatalError ();
-		if (begin == 0)
+		if (begin == 0 && !issubshell)
 			pgid = pid;
 		if (!pid)
 		{
@@ -699,7 +724,6 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 				close (pipes[1][0]);
 				close (pipes[1][1]);
 			}
-
 			bracketcnt = 0;
 			cnt = 0;
 			for (j = begin; j < divider; ++j)
@@ -732,10 +756,8 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 						--bracketcnt;
 					command[cnt++] = params[j];
 				}
-
 			executeCommand (command, cnt, jobs, njobs);
 		}
-
 		setpgid (pid, pgid);
 		begin = divider + 1;
 	}
@@ -762,14 +784,21 @@ int controlJob (param_t *params, int nparams, int isforeground, job_t **jobs, in
 
 		if ((pid = doCommands (params + begin, divider - begin, *jobs, *njobs)) < 0)
 			fatalError ();
+
 		pgid = getpgid (pid);
 		if (isforeground)
 		{
-			if (waitProcessGroup (pid, pgid, &exitstatus)) /* Check if process stopped is non-zero */
+			if (waitProcessGroup (pid, pgid, &exitstatus)) /* Check if process has stopped */
+			{
 				addJob (jobs, njobs, params + begin, divider - begin, pgid, ST_JUSTSTP);
+				exitstatus = 1;
+			}
 		}
 		else
+		{
 			addJob (jobs, njobs, params + begin, divider - begin, pgid, ST_RUNNING);
+			exitstatus = 1;
+		}
 
 		begin = divider + 1;
 	}
@@ -807,8 +836,7 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 			{
 				setpgid (0, 0);
 				issubshell = 1;
-				launchJobs (params, nparams - 1, jobs, njobs);
-				exit (0);
+				exit (launchJobs (params, nparams - 1, jobs, njobs));
 			}
 
 			setpgid (pid, pid);
@@ -923,7 +951,7 @@ int main ()
 	job_t *jobs = NULL;
 	result_t ret;
 
-	signal (SIGINT, SIG_IGN);
+	signal (SIGINT,  SIG_IGN);
 	signal (SIGTSTP, SIG_IGN);
 	signal (SIGTTOU, SIG_IGN);
 
