@@ -3,7 +3,6 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 
-#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,20 +12,24 @@
 #define STR_SIZE 128
 #define PARAM_COUNT 5
 #define DFL_PROMPT "$ "
+#define CONT_PROMPT "> "
 
 int issubshell = 0;
 
 /* Todo:
- * -New line after CTR-C?
- * -Move checkJobs, so "jobs" could be redirected?
- * -Rework internal command handling
+ * -Everything halts after CTR-C
  * -Rework error handling
+ * -Divide internalCommand
  */
 
-typedef enum { RET_OK, RET_ERR, RET_EOF } result_t;
+typedef enum { RET_OK, RET_EOF } result_t;
+
 typedef enum { ST_NONE, ST_RUNNING, ST_DONE, ST_STOPPED, ST_JUSTSTP } status_t;
+
 typedef enum { WT_WORD = 0, WT_LBRACKET, WT_RBRACKET, WT_FILERD, WT_FILEWRTRUNC, WT_FILEWRAPPEND, WT_BACKGROUND,
                WT_AND, WT_OR, WT_SEMICOLON, WT_PIPE } word_t;
+#define IS_FILEOP(a) ((a) == WT_FILEWRAPPEND || (a) == WT_FILEWRTRUNC || (a) == WT_FILERD)
+
 typedef struct
 {
 	char *job;
@@ -236,7 +239,7 @@ void showJobs (job_t *jobs, int njobs, int fullog)
 }
 
 /* Checks jobs statuses. fullog determines if all the jobs should be shown, or only the done and just stopped ones */
-void checkJobs (job_t **jobs, int *njobs, int fullog)
+void checkJobs (job_t **jobs, int *njobs)
 {
 	int i, status;
 	pid_t pid;
@@ -248,17 +251,18 @@ void checkJobs (job_t **jobs, int *njobs, int fullog)
 		if (job->status == ST_NONE)
 			continue;
 		while ((pid = waitpid (-job->pgid, &status, WNOHANG | WUNTRACED | WCONTINUED)) > 0)
-			if (job->pgid == pid)
-			{
-				if (WIFSTOPPED (status))
-					job->status = ST_JUSTSTP;
-				else if (WIFCONTINUED (status))
-					job->status = ST_RUNNING;
-				else
-					job->status = ST_DONE;
-			}
+			if (WIFSTOPPED (status))
+				job->status = ST_JUSTSTP;
+			else if (WIFCONTINUED (status))
+				job->status = ST_RUNNING;
+		if (pid == -1)
+			job->status = ST_DONE;
 	}
-	showJobs (*jobs, *njobs, fullog);
+}
+
+void deleteDoneJobs (job_t **jobs, int *njobs)
+{
+	int i;
 	for (i = 0; i < *njobs; ++i)
 		if ((*jobs)[i].status == ST_DONE)
 			deleteJob (jobs, njobs, i);
@@ -270,7 +274,7 @@ word_t charType (char ch, word_t prev)
 	if (ch == '>' && prev == WT_FILEWRTRUNC) return WT_FILEWRAPPEND;
 	if (ch == '|' && prev == WT_PIPE)		 return WT_OR;
 	if (ch == '&' && prev == WT_BACKGROUND)	 return WT_AND;
-	if (prev != 0) return 0;
+	if (prev != 0) return WT_WORD;
 	if (ch == '>') return WT_FILEWRTRUNC;
 	if (ch == '<') return WT_FILERD;
 	if (ch == '&') return WT_BACKGROUND;
@@ -278,7 +282,7 @@ word_t charType (char ch, word_t prev)
 	if (ch == '(') return WT_LBRACKET;
 	if (ch == ')') return WT_RBRACKET;
 	if (ch == ';') return WT_SEMICOLON;
-	return 0;
+	return WT_WORD;
 }
 
 /* Reads the infinite string and parses it into substrings array. Return statuses:
@@ -289,30 +293,21 @@ word_t charType (char ch, word_t prev)
  */
 result_t readCommand (param_t **params, int *nparams)
 {
-	enum { IN_INITIAL, IN_WORD, IN_BETWEEN, IN_ESCAPE, IN_QUOTES, IN_COMMENT, IN_ERROR, IN_SPECIAL } state = IN_INITIAL, previous;
-	int ch, len = 0, type;
+	enum { IN_WORD, IN_BETWEEN, IN_ESCAPE, IN_QUOTES, IN_COMMENT, IN_SPECIAL } state = IN_BETWEEN, previous;
+	int ch, len = 0, type, bracketcnt = 0;
 
 	*nparams = 0;
 
 	while (1)
 	{
 		ch = getchar ();
-		if (ch == EOF && state == IN_INITIAL)
+		if (ch == EOF)
 			return RET_EOF;
-		else if (ch == EOF)
-			continue;
 
 		switch (state)
 		{
-			case IN_INITIAL:
-				if (ch == '\n' || ch == '#')
-				{
-					addParam (params, nparams, WT_WORD);
-					endString (&(*params)[*nparams - 1].word, 0);
-				}
-
 			case IN_SPECIAL:
-				if (state == IN_SPECIAL && (type = charType (ch, (*params)[*nparams - 1].type)))
+				if ((type = charType (ch, (*params)[*nparams - 1].type)))
 				{
 					state = IN_BETWEEN;
 					(*params)[*nparams - 1].type = type;
@@ -322,7 +317,13 @@ result_t readCommand (param_t **params, int *nparams)
 				}
 
 			case IN_BETWEEN:
-				if (ch == '\n')
+				if (ch == '(')
+					++bracketcnt;
+				else if (ch == ')')
+					--bracketcnt;
+				if (ch == '\n' && bracketcnt > 0)
+					printf(CONT_PROMPT);
+				else if (ch == '\n')
 					return RET_OK;
 				else if (ch == '\\')
 				{
@@ -359,7 +360,13 @@ result_t readCommand (param_t **params, int *nparams)
 				break;
 
 			case IN_WORD:
-				if (ch == '\n')
+				if (ch == '(')
+					++bracketcnt;
+				else if (ch == ')')
+					--bracketcnt;
+				if (ch == '\n' && bracketcnt  > 0)
+					printf (CONT_PROMPT);
+				else if (ch == '\n')
 				{
 					endString (&(*params)[*nparams - 1].word, len);
 					return RET_OK;
@@ -402,17 +409,14 @@ result_t readCommand (param_t **params, int *nparams)
 			case IN_ESCAPE:
 				state = previous;
 				if (ch == '\n')
-					putchar ('>');
+					printf(CONT_PROMPT);
 				else
 					addChar (&(*params)[*nparams - 1].word, &len, ch);
 				break;
 
 			case IN_QUOTES:
 				if (ch == '\n')
-				{
-					putchar ('>');
-					break;
-				}
+					printf (CONT_PROMPT);
 				else if (ch == '\\')
 				{
 					previous = IN_QUOTES;
@@ -431,11 +435,6 @@ result_t readCommand (param_t **params, int *nparams)
 				if (ch == '\n')
 					return RET_OK;
 				break;
-
-			case IN_ERROR:
-				if (ch == '\n')
-					return RET_ERR;
-				break;
 		}
 	}
 }
@@ -450,10 +449,9 @@ void placeEnv (param_t *params, int nparams)
 		int len, posp = 0, poss = 0, ch;
 		char *s;
 
-		if (params[i].type != WT_WORD || len < 2 || !strchr (params[i].word, '$'))
+		if (params[i].type != WT_WORD || (len = strlen (params[i].word)) < 2 || !strchr (params[i].word, '$'))
 			continue;
 
-		len = strlen (params[i].word);
 		if ((s = calloc (STR_SIZE, sizeof (char))) == NULL)
 			fatalError ();
 
@@ -497,17 +495,15 @@ void placeEnv (param_t *params, int nparams)
 }
 
 /* Checks if command is internal that must be executed in the main process */
-int isInternal (param_t *command, int nparams)
+int isInternal (param_t *params, int nparams)
 {
 	int i;
 
-	if (command[0].type != WT_WORD)
-		return 0;
-	if (strcmp (command[0].word, "cd") && strcmp (command[0].word, "exit") && strcmp (command[0].word, "jobs") && strcmp (command[0].word, "fg")
-	    && strcmp (command[0].word, "bg"))
+	if (params[0].type != WT_WORD || (strcmp (params[0].word, "cd") && strcmp (params[0].word, "exit")
+	    && strcmp (params[0].word, "jobs") && strcmp (params[0].word, "fg") && strcmp (params[0].word, "bg")))
 		return 0;
 	for (i = 1; i < nparams; ++i)
-		if (command[i].word[0] == '|')
+		if (params[i].type == WT_PIPE)
 			return 0;
 
 	return 1;
@@ -560,37 +556,38 @@ int findDivider (param_t *params, int nparams, int begin, word_t div1, word_t di
 /* For recursion */
 int launchJobs (param_t *, int, job_t **, int *);
 
-/* Executes a straightforward command (no pipes, no dividers - just command with parameters) */
-void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
+/* Executes a straightforward params (no pipes, no dividers - just params with parameters) */
+void executeCommand (param_t *params, int nparams, job_t *jobs, int njobs)
 {
-	char **params;
+	char **command;
 	int i;
 
 	signal (SIGINT,  SIG_DFL);
 	signal (SIGTSTP, SIG_DFL);
 	signal (SIGTTOU, SIG_DFL);
 
-	if (command[0].type == WT_LBRACKET) /* Launching subshell */
+	if (params[0].type == WT_LBRACKET) /* Launching subshell */
 	{
 		issubshell = 1;
-		exit (launchJobs (command + 1, nparams - 2, &jobs, &njobs));
+		exit (launchJobs (params + 1, nparams - 2, &jobs, &njobs));
 	}
 
-	if (!nparams || command[0].word[0] == '\0')
+	if (!nparams || params[0].word[0] == '\0')
 		exit (0);
-	if (!strcmp (command[0].word, "cd") || !strcmp (command[0].word, "exit") || !strcmp (command[0].word, "fg") || !strcmp (command[0].word, "bg"))
+	if (!strcmp (params[0].word, "cd") || !strcmp (params[0].word, "exit")
+	    || !strcmp (params[0].word, "fg") || !strcmp (params[0].word, "bg"))
 		exit (0);
-	if (!strcmp (command[0].word, "jobs"))
+	if (!strcmp (params[0].word, "jobs"))
 	{
 		showJobs (jobs, njobs, 1);
 		exit (0);
 	}
-	if (!strcmp (command[0].word, "battlefield"))
+	if (!strcmp (params[0].word, "battlefield"))
 	{
 		puts ("Hi guys, TheWorldsEnd here!");
 		exit (0);
 	}
-	if (!strcmp (command[0].word, "pwd"))
+	if (!strcmp (params[0].word, "pwd"))
 	{
 		char *s = getcwd (NULL, 0);
 		if (s == NULL)
@@ -603,50 +600,148 @@ void executeCommand (param_t *command, int nparams, job_t *jobs, int njobs)
 		exit (0);
 	}
 
-	params = malloc ((nparams + 1) * sizeof (char *));
+	command = malloc ((nparams + 1) * sizeof (char *));
 	for (i = 0; i < nparams; ++i)
-		params[i] = command[i].word;
-	params[nparams] = NULL;
-	execvp (params[0], params);
+		command[i] = params[i].word;
+	command[nparams] = NULL;
+	execvp (command[0], command);
 	fprintf(stderr, "xish: ");
-	perror (params[0]);
+	perror (command[0]);
 	exit (1);
 }
 
-/* Executes internal command */
-int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
+/* Return new command array without file redirectors */
+param_t *removeRedirectors (param_t *params, int nparams, int *count)
 {
-	if (!strcmp (command[0].word, "exit"))
-		exit (0);
-	else if (!strcmp (command[0].word, "cd"))
-	{
-		if (nparams == 1)
-		{
-			if (chdir (getenv ("HOME")))
-				perror ("xish");
-		}
+	int i, bracketcnt = 0, cnt = 0;
+	param_t *command;
+
+	if ((command = calloc (nparams, sizeof (param_t))) == NULL)
+		return NULL;
+
+	for (i = 0; i < nparams; ++i)
+		if (bracketcnt == 0 && IS_FILEOP (params[i].type))
+			++i;
 		else
-			if (chdir (command[1].word))
-				perror ("xish");
+		{
+			if (params[i].type == WT_LBRACKET)
+					--bracketcnt;
+			else if (params[i].type == WT_RBRACKET)
+					++bracketcnt;
+			command[cnt++] = params[i];
+		}
+
+	*count = cnt;
+	return command;
+}
+
+/* Dups files from params to stdin and stdout */
+int dupFiles (param_t *params, int nparams)
+{
+	int i, bracketcnt = 0, in = STDIN_FILENO, out = STDOUT_FILENO;
+
+	for (i = nparams - 2; i > 0; --i)
+		if (bracketcnt == 0 && IS_FILEOP (params[i].type))
+		{
+			if (out == 1 && params[i].type == WT_FILEWRTRUNC)
+			{
+				if ((out = open (params[i + 1].word, O_WRONLY | O_CREAT | O_TRUNC, 0644)) == -1)
+				{
+					perror ("xish");
+					return 1;
+				}
+			}
+			else if (out == 1 && params[i].type == WT_FILEWRAPPEND)
+			{
+				if ((out = open (params[i + 1].word, O_WRONLY | O_CREAT | O_APPEND, 0644)) == -1)
+				{
+					perror ("xish");
+					return 1;
+				}
+			}
+			else if (in == 0 && params[i].type == WT_FILERD)
+			{
+				if ((in = open (params[i + 1].word, O_RDONLY)) == -1)
+				{
+					perror ("xish");
+					return 1;
+				}
+			}
+			--i;
+		}
+		else if (params[i].type == WT_LBRACKET)
+				--bracketcnt;
+		else if (params[i].type == WT_RBRACKET)
+				++bracketcnt;
+
+	if (in  != STDIN_FILENO)  { dup2 (in, 0);  close (in);  }
+	if (out != STDOUT_FILENO) { dup2 (out, 1); close (out); }
+
+	return 0;
+}
+
+/* Executes internal command */
+int internalCommand (param_t *params, int nparams, job_t **jobs, int *njobs)
+{
+	int savestdin, savestdout, count;
+	param_t *command;
+	savestdin =  dup (STDIN_FILENO);
+	savestdout = dup (STDOUT_FILENO);
+
+	if (dupFiles (params, nparams))
+		return 1;
+	if ((command = removeRedirectors (params, nparams, &count)) == NULL)
+		return 1;
+
+	if (!strcmp (params[0].word, "exit"))
+		exit (0);
+	else if (!strcmp (params[0].word, "cd"))
+	{
+		char *s;
+		if (nparams == 1)
+			s = params[0].word;
+		else
+			s = getenv ("HOME");
+		if (chdir (s))
+		{
+			perror ("xish");
+			dup2 (savestdin,  STDIN_FILENO);
+			dup2 (savestdout, STDOUT_FILENO);
+			return 1;
+		}
 	}
-	else if (!strcmp (command[0].word, "jobs"))
-		checkJobs (jobs, njobs, 1);
-	else if (!strcmp (command[0].word, "fg"))
+	else if (!strcmp (params[0].word, "jobs"))
+	{
+		if (issubshell)
+		{
+			fprintf (stderr, "xish: jobs: no job control\n");
+			dup2 (savestdin,  STDIN_FILENO);
+			dup2 (savestdout, STDOUT_FILENO);
+			return 1;
+		}
+		showJobs (*jobs, *njobs, 1);
+		deleteDoneJobs (jobs, njobs);
+	}
+	else if (!strcmp (params[0].word, "fg"))
 	{
 		int n;
 		if (issubshell)
 		{
-			fprintf(stderr, "xish: fg: no job control\n");
+			fprintf (stderr, "xish: fg: no job control\n");
+			dup2 (savestdin,  STDIN_FILENO);
+			dup2 (savestdout, STDOUT_FILENO);
 			return 1;
 		}
 
 		if (nparams == 1)
 			n = *njobs - 1;
 		else
-			n = atoi (command[1].word) - 1;
+			n = atoi (params[1].word) - 1;
 		if (n < 0 || n >= *njobs)
 		{
-			puts ("xish: no such job");
+			fprintf (stderr, "xish: no such job\n");
+			dup2 (savestdin,  STDIN_FILENO);
+			dup2 (savestdout, STDOUT_FILENO);
 			return 1;
 		}
 		if (waitProcessGroup (0, (*jobs)[n].pgid, NULL))
@@ -654,12 +749,14 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 		else
 			deleteJob (jobs, njobs, n);
 	}
-	else if (!strcmp (command[0].word, "bg"))
+	else if (!strcmp (params[0].word, "bg"))
 	{
 		int n;
 		if (issubshell)
 		{
-			fprintf(stderr, "xish: bg: no job control\n");
+			fprintf (stderr, "xish: bg: no job control\n");
+			dup2 (savestdin,  STDIN_FILENO);
+			dup2 (savestdout, STDOUT_FILENO);
 			return 1;
 		}
 
@@ -669,16 +766,20 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 			while (--n >= 0 && (*jobs)[n].status != ST_STOPPED);
 		}
 		else
-			n = atoi (command[1].word) - 1;
+			n = atoi (params[1].word) - 1;
 		if (n < 0 || n >= *njobs)
 		{
-			fprintf(stderr, "xish: no such job\n");
+			fprintf (stderr, "xish: no such job\n");
+			dup2 (savestdin,  STDIN_FILENO);
+			dup2 (savestdout, STDOUT_FILENO);
 			return 1;
 		}
 		kill (-(*jobs)[n].pgid, SIGCONT);
 		printf ("[%d] %s\n", n + 1, (*jobs)[n].job);
 	}
 
+	dup2 (savestdin,  STDIN_FILENO);
+	dup2 (savestdout, STDOUT_FILENO);
 	return 0;
 }
 
@@ -686,7 +787,7 @@ int internalCommand (param_t *command, int nparams, job_t **jobs, int *njobs)
 pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 {
 	pid_t pgid = getpgid (0), pid;
-	int begin = 0, divider, bracketcnt = 0, j, cnt, pipes[2][2]={{0}}, fd;
+	int begin = 0, divider, count, pipes[2][2]={{0}};
 	param_t *command;
 
 	while (begin < nparams)
@@ -710,8 +811,6 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 		if (!pid)
 		{
 			setpgid (0, pgid);
-			if ((command = calloc (divider - begin + 1, sizeof (param_t))) == NULL)
-				fatalError ();
 
 			if (begin > 0)
 			{
@@ -724,39 +823,12 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 				close (pipes[1][0]);
 				close (pipes[1][1]);
 			}
-			bracketcnt = 0;
-			cnt = 0;
-			for (j = begin; j < divider; ++j)
-				if (bracketcnt == 0 &&
-						(params[j].type == WT_FILEWRTRUNC || params[j].type == WT_FILERD || params[j].type == WT_FILEWRAPPEND))
-				{
-					if (params[j].type == WT_FILEWRTRUNC)
-					{
-						fd = open (params[j + 1].word, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-						dup2 (fd, 1);
-					}
-					else if (params[j].type == WT_FILEWRAPPEND)
-					{
-						fd = open (params[j + 1].word, O_WRONLY | O_CREAT | O_APPEND, 0666);
-						dup2 (fd, 1);
-					}
-					else
-					{
-						fd = open (params[j + 1].word, O_RDONLY);
-						dup2 (fd, 0);
-					}
-					close (fd);
-					++j;
-				}
-				else
-				{
-					if (params[j].type == WT_LBRACKET)
-						++bracketcnt;
-					else if (params[j].type == WT_RBRACKET)
-						--bracketcnt;
-					command[cnt++] = params[j];
-				}
-			executeCommand (command, cnt, jobs, njobs);
+
+			if (dupFiles (params + begin, divider - begin))
+				exit (1);
+			if ((command = removeRedirectors (params + begin, divider - begin, &count)) == NULL)
+				exit (1);
+			executeCommand (command, count, jobs, njobs);
 		}
 		setpgid (pid, pgid);
 		begin = divider + 1;
@@ -782,23 +854,25 @@ int controlJob (param_t *params, int nparams, int isforeground, job_t **jobs, in
 			continue;
 		}
 
+		if (isforeground && isInternal (params + begin, divider - begin))
+		{
+			exitstatus = internalCommand (params + begin, divider - begin, jobs, njobs);
+			begin = divider + 1;
+			continue;
+		}
+
 		if ((pid = doCommands (params + begin, divider - begin, *jobs, *njobs)) < 0)
 			fatalError ();
-
 		pgid = getpgid (pid);
+		exitstatus = 1;
+
 		if (isforeground)
 		{
 			if (waitProcessGroup (pid, pgid, &exitstatus)) /* Check if process has stopped */
-			{
 				addJob (jobs, njobs, params + begin, divider - begin, pgid, ST_JUSTSTP);
-				exitstatus = 1;
-			}
 		}
-		else
-		{
+		else if (!issubshell)
 			addJob (jobs, njobs, params + begin, divider - begin, pgid, ST_RUNNING);
-			exitstatus = 1;
-		}
 
 		begin = divider + 1;
 	}
@@ -820,13 +894,6 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 		divider = findDivider (params, nparams, begin, WT_BACKGROUND, WT_SEMICOLON);
 		isforeground = divider == nparams || params[divider].type == WT_SEMICOLON;
 		needcontrol = !isforeground && findDivider (params + begin, divider - begin, 0, WT_AND, WT_OR) < divider - begin;
-
-		if (isforeground && isInternal (params + begin, divider - begin))  /* Needs to be changed maybe? */
-		{
-			internalCommand (params + begin, divider - begin, jobs, njobs);
-			begin = divider + 1;
-			continue;
-		}
 
 		if (needcontrol)
 		{
@@ -855,6 +922,9 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 int checkSyntax (param_t *params, int nparams)
 {
 	int i, bracketcnt = 0, nospecial = 1, noend = 1;
+
+	if (nparams == 0)
+		return 1;
 
 	for (i = 0; i < nparams; ++i)
 	{
@@ -885,9 +955,9 @@ int checkSyntax (param_t *params, int nparams)
 	if (i < nparams || bracketcnt > 0 || noend)
 	{
 		if (i < nparams)
-			printf ("xish: syntax error near %s\n", params[i].word);
+			fprintf (stderr, "xish: syntax error near %s\n", params[i].word);
 		else
-			printf ("xish: unexpected end of file\n");
+			fprintf (stderr, "xish: unexpected end of file\n");
 		return 0;
 	}
 
@@ -943,7 +1013,7 @@ void showPrompt ()
 	free (cwd);
 }
 
-/* Just a main... */
+/* Just a main */
 int main ()
 {
 	int nparams, njobs = 0;
@@ -961,17 +1031,16 @@ int main ()
 
 	while ((ret = readCommand (&params, &nparams)) != RET_EOF)
 	{
-		if (ret == RET_ERR)
-			puts ("xish: wrong command format");
-		else if (checkSyntax (params, nparams))
+		if (checkSyntax (params, nparams))
 		{
 			placeEnv (params, nparams);
 			launchJobs (params, nparams, &jobs, &njobs);
 		}
-
-		clearParams (&params, nparams);
-		checkJobs (&jobs, &njobs, 0);
+		showJobs (jobs, njobs, 0);
+		deleteDoneJobs (&jobs, &njobs);
 		showPrompt ();
+		clearParams (&params, nparams);
+		checkJobs (&jobs, &njobs);
 	}
 
 	putchar ('\n');
