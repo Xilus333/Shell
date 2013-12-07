@@ -19,10 +19,9 @@ int issubshell = 0;
 /* Todo:
  * -Everything halts after CTR-C
  * -Rework error handling
- * -Divide internalCommand
  */
 
-typedef enum { RET_OK, RET_EOF } result_t;
+typedef enum { RET_OK, RET_EOF, RET_MEMORYERR } result_t;
 
 typedef enum { ST_NONE, ST_RUNNING, ST_DONE, ST_STOPPED, ST_JUSTSTP } status_t;
 
@@ -43,91 +42,97 @@ typedef struct
 	word_t type;
 } param_t;
 
-FILE *file;
-
-/* Terminates program */
-void fatalError ()
+/* Terminates program, for use in subshells */
+void fatal_error()
 {
-	putchar ('\n');
-	exit (1);
+	perror("xish");
+	exit(-1);
+}
+
+/* A little functions to use with return */
+int nonfatal_error(char *message)
+{
+	if (message == NULL)
+		perror ("xish");
+	else
+		fprintf (stderr, message);
+	return -1;
 }
 
 /* Reallocates str if it has reached maximum capacity */
-void checkStringLen (char **str, int len)
+int checkStringLen (char **pstr, int len)
 {
 	char *ptr;
-
 	if (len % STR_SIZE > 0)
-		return;
+		return 0;
 	if (len == 0)
-		*str = NULL;
-	if ((ptr = realloc (*str, (len + STR_SIZE) * sizeof (char))) == NULL)
-			fatalError ();
-	*str = ptr;
+		*pstr = NULL;
+	if ((ptr = realloc (*pstr, (len + STR_SIZE) * sizeof (char))) == NULL)
+		return nonfatal_error(NULL);
+	*pstr = ptr;
+	return 0;
 }
 
 
 /* Adds null terminator to a string, reallocates it if neccessary */
-void endString (char **str, int len)
+int endString (char **str, int len)
 {
 	char *ptr;
-
 	if (len == 0)
 		*str = NULL;
 	if (len % STR_SIZE == 0)
 	{
 		if ((ptr = realloc (*str, (len + 1) * sizeof (char))) == NULL)
-			fatalError ();
+			return nonfatal_error(NULL);
 		*str = ptr;
 	}
 	(*str)[len] = '\0';
+	return 0;
 }
 
 /* Adds ch to a string */
-void addChar (char **str, int *len, char ch)
+int addChar (char **str, int *len, char ch)
 {
-	checkStringLen (str, *len);
+	if (checkStringLen (str, *len) == -1)
+		return -1;
 	(*str)[(*len)++] = ch;
+	return 0;
 }
 
 /* Realocates params if it has reached maximum capacity */
-void checkParamCnt (param_t **params, int nparams)
+int checkParamCnt (param_t **params, int nparams)
 {
 	param_t *ptr;
-
 	if (nparams % PARAM_COUNT > 0)
-		return;
+		return 0;
 	if ((ptr = realloc (*params, (nparams + PARAM_COUNT) * sizeof (param_t))) == NULL)
-		fatalError ();
-
+		return nonfatal_error(NULL);
 	*params = ptr;
+	return 0;
 }
 
 /* Adds one parameter to params */
-void addParam (param_t **params, int *nparams, word_t ptype)
+int addParam (param_t **params, int *nparams, word_t ptype)
 {
-	if (*nparams == 0)
-		checkParamCnt (params, 0);
-	else
-		checkParamCnt (params, *nparams + 1);
+	if (*nparams == 0 ? checkParamCnt (params, 0) : checkParamCnt (params, *nparams + 1))
+		return -1;
 	(*params)[(*nparams)++].type = ptype;
+	return 0;
 }
 
 /* Frees params array */
 void clearParams (param_t **params, int nparams)
 {
 	int i;
-
 	if (params == NULL)
 		return;
 	for (i = 0; i < nparams; ++i)
 		free ((*params)[i].word);
 	free (*params);
-
 	*params = NULL;
 }
 
-/* Prints params array. For testing puroses only */
+/* Prints params array. For testing purposes only */
 void printParams (param_t *params, int nparams)
 {
 	int i;
@@ -141,21 +146,19 @@ void printParams (param_t *params, int nparams)
 }
 
 /* Adds new entry to jobs array, initializes the structure with given data */
-void addJob (job_t **jobs, int *njobs, param_t *command, int nparams, int pgid, status_t status)
+int addJob (job_t **jobs, int *njobs, param_t *command, int nparams, int pgid, status_t status)
 {
 	int len = nparams + 1, i;
 	job_t *ptr;
 
-	if (issubshell)
-		fprintf (stderr, "xish: you should not be here!\n");
-
 	if ((ptr = realloc (*jobs, (*njobs + 1) * sizeof (job_t))) == NULL)
-		fatalError ();
+		return nonfatal_error(NULL);
 
 	*jobs = ptr;
 	ptr = *jobs + *njobs;
 	ptr->pgid = pgid;
 	ptr->status = status;
+	++(*njobs);
 
 	for (i = 0; i < nparams; ++i)
 		if (command[i].type == WT_WORD)
@@ -163,7 +166,7 @@ void addJob (job_t **jobs, int *njobs, param_t *command, int nparams, int pgid, 
 		else
 			len += 2;
 	if ((ptr->job = calloc (len + 1, sizeof (char))) == NULL)
-		fatalError ();
+		return nonfatal_error(NULL);
 
 	len = 0;
 	for (i = 0; i < nparams; ++i)
@@ -175,8 +178,9 @@ void addJob (job_t **jobs, int *njobs, param_t *command, int nparams, int pgid, 
 	}
 
 	if (status == ST_RUNNING)
-		printf ("[%d] %d\n", *njobs + 1, ptr->pgid);
-	++(*njobs);
+		printf ("[%d] %d\n", *njobs, ptr->pgid);
+
+	return 0;
 }
 
 /* Deletes done entry form jobs array */
@@ -185,10 +189,8 @@ void deleteJob (job_t **jobs, int *njobs, int n)
 	int i;
 	job_t *ptr;
 
-	if (issubshell)
-		fprintf (stderr, "xish: you should not be here!\n");
-
-	free ((*jobs)[n].job);
+	if ((*jobs)[n].job != NULL)
+		free ((*jobs)[n].job);
 	(*jobs)[n].job = NULL;
 	(*jobs)[n].status = ST_NONE;
 	if (n == *njobs - 1)
@@ -196,7 +198,7 @@ void deleteJob (job_t **jobs, int *njobs, int n)
 		i = n;
 		while (((*jobs)[i].status == ST_NONE) && --i >= 0);
 		if ((ptr = realloc (*jobs, (i + 1) * sizeof (job_t))) == NULL && i + 1 > 0)
-			fatalError ();
+			return;
 		*jobs = ptr;
 		*njobs = i + 1;
 	}
@@ -285,15 +287,22 @@ word_t charType (char ch, word_t prev)
 	return WT_WORD;
 }
 
+void flush_stdin()
+{
+	char ch;
+	while ((ch = getchar()) != '\n' && ch != EOF);
+}
+
+#define MEMORYOP(a) if ((a) == -1) { flush_stdin(); return RET_MEMORYERR; }
+
 /* Reads the infinite string and parses it into substrings array. Return statuses:
  * RET_OK  - command is correct
- * RET_ERR - wrong command format
  * RET_EOF - EOF found
  * RET_MEMORYERR - memory allocation error
  */
 result_t readCommand (param_t **params, int *nparams)
 {
-	enum { IN_WORD, IN_BETWEEN, IN_ESCAPE, IN_QUOTES, IN_COMMENT, IN_SPECIAL } state = IN_BETWEEN, previous;
+	enum { IN_WORD, IN_BETWEEN, IN_ESCAPE, IN_QUOTES, IN_SPECIAL } state = IN_BETWEEN, previous;
 	int ch, len = 0, type, bracketcnt = 0;
 
 	*nparams = 0;
@@ -307,12 +316,12 @@ result_t readCommand (param_t **params, int *nparams)
 		switch (state)
 		{
 			case IN_SPECIAL:
-				if ((type = charType (ch, (*params)[*nparams - 1].type)))
+				if ((type = charType (ch, (*params)[*nparams - 1].type)) != WT_WORD)
 				{
 					state = IN_BETWEEN;
 					(*params)[*nparams - 1].type = type;
-					addChar (&(*params)[*nparams - 1].word, &len, ch);
-					endString (&(*params)[*nparams - 1].word, 2);
+					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
+					MEMORYOP(endString (&(*params)[*nparams - 1].word, 2));
 					break;
 				}
 
@@ -329,15 +338,18 @@ result_t readCommand (param_t **params, int *nparams)
 				{
 					previous = IN_WORD;
 					state = IN_ESCAPE;
-					addParam (params, nparams, WT_WORD);
+					MEMORYOP(addParam (params, nparams, WT_WORD));
 					len = 0;
 				}
 				else if (ch == '#')
-					state = IN_COMMENT;
+				{
+					flush_stdin();
+					return RET_OK;
+				}
 				else if (ch == '"')
 				{
 					state = IN_QUOTES;
-					addParam (params, nparams, WT_WORD);
+					MEMORYOP(addParam (params, nparams, WT_WORD));
 					len = 0;
 				}
 				else if (isspace (ch))
@@ -345,17 +357,17 @@ result_t readCommand (param_t **params, int *nparams)
 				else if ((type = charType (ch, 0)) > 0)
 				{
 					state = IN_SPECIAL;
-					addParam (params, nparams, type);
+					MEMORYOP(addParam (params, nparams, type));
 					len = 0;
-					addChar (&(*params)[*nparams - 1].word, &len, ch);
-					endString (&(*params)[*nparams - 1].word, 1);
+					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
+					MEMORYOP(endString (&(*params)[*nparams - 1].word, 1));
 				}
 				else
 				{
 					state = IN_WORD;
-					addParam (params, nparams, WT_WORD);
+					MEMORYOP(addParam (params, nparams, WT_WORD));
 					len = 0;
-					addChar (&(*params)[*nparams - 1].word, &len, ch);
+					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
 				}
 				break;
 
@@ -368,7 +380,7 @@ result_t readCommand (param_t **params, int *nparams)
 					printf (CONT_PROMPT);
 				else if (ch == '\n')
 				{
-					endString (&(*params)[*nparams - 1].word, len);
+					MEMORYOP(endString (&(*params)[*nparams - 1].word, len));
 					return RET_OK;
 				}
 				else if (ch == '\\')
@@ -378,32 +390,33 @@ result_t readCommand (param_t **params, int *nparams)
 				}
 				else if (ch == '#')
 				{
-					state = IN_COMMENT;
-					endString (&(*params)[*nparams - 1].word, len);
+					flush_stdin();
+					MEMORYOP(endString (&(*params)[*nparams - 1].word, len));
+					return RET_OK;
 				}
 				else if (ch == '"')
 				{
 					state = IN_QUOTES;
-					endString (&(*params)[*nparams - 1].word, len);
-					addParam (params, nparams, WT_WORD);
+					MEMORYOP(endString (&(*params)[*nparams - 1].word, len));
+					MEMORYOP(addParam (params, nparams, WT_WORD));
 					len = 0;
 				}
 				else if (isspace (ch))
 				{
 					state = IN_BETWEEN;
-					endString (&(*params)[*nparams - 1].word, len);
+					MEMORYOP(endString (&(*params)[*nparams - 1].word, len));
 				}
 				else if ((type = charType (ch, 0)) > 0)
 				{
 					state = IN_SPECIAL;
-					endString (&(*params)[*nparams - 1].word, len);
-					addParam (params, nparams, type);
+					MEMORYOP(endString (&(*params)[*nparams - 1].word, len));
+					MEMORYOP(addParam (params, nparams, type))
 					len = 0;
-					addChar (&(*params)[*nparams - 1].word, &len, ch);
-					endString (&(*params)[*nparams - 1].word, 1);
+					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
+					MEMORYOP(endString (&(*params)[*nparams - 1].word, 1));
 				}
 				else
-					addChar (&(*params)[*nparams - 1].word, &len, ch);
+					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
 				break;
 
 			case IN_ESCAPE:
@@ -411,7 +424,7 @@ result_t readCommand (param_t **params, int *nparams)
 				if (ch == '\n')
 					printf(CONT_PROMPT);
 				else
-					addChar (&(*params)[*nparams - 1].word, &len, ch);
+					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
 				break;
 
 			case IN_QUOTES:
@@ -425,22 +438,17 @@ result_t readCommand (param_t **params, int *nparams)
 				else if (ch == '"')
 				{
 					state = IN_BETWEEN;
-					endString (&(*params)[*nparams - 1].word, len);
+					MEMORYOP(endString (&(*params)[*nparams - 1].word, len));
 				}
 				else
-					addChar (&(*params)[*nparams - 1].word, &len, ch);
-				break;
-
-			case IN_COMMENT:
-				if (ch == '\n')
-					return RET_OK;
+					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
 				break;
 		}
 	}
 }
 
 /* Replaces environmental variables with their value */
-void placeEnv (param_t *params, int nparams)
+int placeEnv (param_t *params, int nparams)				/* Remake this maybe? */
 {
 	int i;
 
@@ -453,8 +461,7 @@ void placeEnv (param_t *params, int nparams)
 			continue;
 
 		if ((s = calloc (STR_SIZE, sizeof (char))) == NULL)
-			fatalError ();
-
+			return nonfatal_error(NULL);
 		while (posp < len)
 		{
 			char *env;
@@ -462,7 +469,8 @@ void placeEnv (param_t *params, int nparams)
 
 			while (posp < len && params[i].word[posp] != '$')
 			{
-				checkStringLen (&s, poss);
+				if (checkStringLen (&s, poss) == -1)
+					return -1;
 				s[poss++] = params[i].word[posp++];
 			}
 			if (posp == len)
@@ -479,7 +487,11 @@ void placeEnv (param_t *params, int nparams)
 				{
 					char *ptr;
 					if ((ptr = realloc (s, ((poss + strlen (env) + 1) / STR_SIZE + 1) * STR_SIZE * sizeof (char))) == NULL)
-						fatalError ();
+					{
+						perror("xish");
+						free(s);
+						return -1;
+					}
 					s = ptr;
 				}
 				strcpy (s + poss, env);
@@ -492,6 +504,7 @@ void placeEnv (param_t *params, int nparams)
 		free (params[i].word);
 		params[i].word = s;
 	}
+	return 0;
 }
 
 /* Checks if command is internal that must be executed in the main process */
@@ -529,7 +542,7 @@ int waitProcessGroup (pid_t lastpid, int pgid, int *status)
 
 	if (WIFSTOPPED (st))
 		putchar ('\n');
-	if (status != NULL)
+	if (status != NULL && !WIFSTOPPED(st))
 		*status = WEXITSTATUS (pidstatus);
 
 	return WIFSTOPPED (st);
@@ -591,23 +604,22 @@ void executeCommand (param_t *params, int nparams, job_t *jobs, int njobs)
 	{
 		char *s = getcwd (NULL, 0);
 		if (s == NULL)
-		{
-			perror ("xish");
-			exit (1);
-		}
+			fatal_error();
 		puts (s);
 		free (s);
 		exit (0);
 	}
 
-	command = malloc ((nparams + 1) * sizeof (char *));
+	if ((command = malloc ((nparams + 1) * sizeof (char *))) == NULL)
+		fatal_error();
 	for (i = 0; i < nparams; ++i)
 		command[i] = params[i].word;
+	free(params);
 	command[nparams] = NULL;
 	execvp (command[0], command);
 	fprintf(stderr, "xish: ");
 	perror (command[0]);
-	exit (1);
+	exit (-1);
 }
 
 /* Return new command array without file redirectors */
@@ -617,7 +629,10 @@ param_t *removeRedirectors (param_t *params, int nparams, int *count)
 	param_t *command;
 
 	if ((command = calloc (nparams, sizeof (param_t))) == NULL)
-		return NULL;
+	{
+		perror("xish");
+		return 0;
+	}
 
 	for (i = 0; i < nparams; ++i)
 		if (bracketcnt == 0 && IS_FILEOP (params[i].type))
@@ -646,26 +661,17 @@ int dupFiles (param_t *params, int nparams)
 			if (out == 1 && params[i].type == WT_FILEWRTRUNC)
 			{
 				if ((out = open (params[i + 1].word, O_WRONLY | O_CREAT | O_TRUNC, 0644)) == -1)
-				{
-					perror ("xish");
-					return 1;
-				}
+					return nonfatal_error(NULL);
 			}
 			else if (out == 1 && params[i].type == WT_FILEWRAPPEND)
 			{
 				if ((out = open (params[i + 1].word, O_WRONLY | O_CREAT | O_APPEND, 0644)) == -1)
-				{
-					perror ("xish");
-					return 1;
-				}
+					return nonfatal_error(NULL);
 			}
 			else if (in == 0 && params[i].type == WT_FILERD)
 			{
 				if ((in = open (params[i + 1].word, O_RDONLY)) == -1)
-				{
-					perror ("xish");
-					return 1;
-				}
+					return nonfatal_error(NULL);
 			}
 			--i;
 		}
@@ -680,107 +686,104 @@ int dupFiles (param_t *params, int nparams)
 	return 0;
 }
 
+/* cd internal commmand */
+int internalChangeDir (param_t *params, int nparams)
+{
+	char *s;
+	if (nparams > 1)
+		s = params[1].word;
+	else
+		s = getenv ("HOME");
+	if (chdir (s))
+		return nonfatal_error(NULL);
+	return 0;
+}
+
+/* jobs internal command */
+int internalJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
+{
+	if (issubshell)
+		return nonfatal_error("xish: jobs: no job control\n");
+	checkJobs (jobs, njobs);
+	showJobs (*jobs, *njobs, 1);
+	deleteDoneJobs (jobs, njobs);
+	return 0;
+}
+
+/* fg internal command */
+int internalForeground (param_t *params, int nparams, job_t **jobs, int *njobs)
+{
+	int n;
+	if (issubshell)
+		return nonfatal_error("xish: fg: no job control\n");
+
+	if (nparams == 1)
+		n = *njobs - 1;
+	else
+		n = atoi (params[1].word) - 1;
+	if (n < 0 || n >= *njobs)
+		return nonfatal_error("xish: no such job\n");
+
+	if (waitProcessGroup (0, (*jobs)[n].pgid, NULL))
+		(*jobs)[n].status = ST_JUSTSTP;
+	else
+		deleteJob (jobs, njobs, n);
+
+	return 0;
+}
+
+/* bg internal command */
+int internalBackground (param_t *params, int nparams, job_t **jobs, int *njobs)
+{
+	int n;
+	if (issubshell)
+		return nonfatal_error("xish: bg: no job control\n");
+
+	if (nparams == 1)
+	{
+		n = *njobs;
+		while (--n >= 0 && (*jobs)[n].status != ST_STOPPED);
+	}
+	else
+		n = atoi (params[1].word) - 1;
+
+	if (n < 0 || n >= *njobs)
+		return nonfatal_error("xish: no such job\n");
+	kill (-(*jobs)[n].pgid, SIGCONT);
+	printf ("[%d] %s\n", n + 1, (*jobs)[n].job);
+
+	return 0;
+}
+
 /* Executes internal command */
 int internalCommand (param_t *params, int nparams, job_t **jobs, int *njobs)
 {
-	int savestdin, savestdout, count;
+	int savestdin, savestdout, count, result;
 	param_t *command;
 	savestdin =  dup (STDIN_FILENO);
 	savestdout = dup (STDOUT_FILENO);
 
-	if (dupFiles (params, nparams))
-		return 1;
-	if ((command = removeRedirectors (params, nparams, &count)) == NULL)
-		return 1;
+	if (dupFiles (params, nparams) == -1 || (command = removeRedirectors (params, nparams, &count)) == NULL)
+	{
+		dup2 (savestdin,  STDIN_FILENO);
+		dup2 (savestdout, STDOUT_FILENO);
+		return -1;
+	}
 
-	if (!strcmp (params[0].word, "exit"))
+	if (!strcmp (command[0].word, "exit"))
 		exit (0);
-	else if (!strcmp (params[0].word, "cd"))
-	{
-		char *s;
-		if (nparams == 1)
-			s = params[0].word;
-		else
-			s = getenv ("HOME");
-		if (chdir (s))
-		{
-			perror ("xish");
-			dup2 (savestdin,  STDIN_FILENO);
-			dup2 (savestdout, STDOUT_FILENO);
-			return 1;
-		}
-	}
-	else if (!strcmp (params[0].word, "jobs"))
-	{
-		if (issubshell)
-		{
-			fprintf (stderr, "xish: jobs: no job control\n");
-			dup2 (savestdin,  STDIN_FILENO);
-			dup2 (savestdout, STDOUT_FILENO);
-			return 1;
-		}
-		showJobs (*jobs, *njobs, 1);
-		deleteDoneJobs (jobs, njobs);
-	}
-	else if (!strcmp (params[0].word, "fg"))
-	{
-		int n;
-		if (issubshell)
-		{
-			fprintf (stderr, "xish: fg: no job control\n");
-			dup2 (savestdin,  STDIN_FILENO);
-			dup2 (savestdout, STDOUT_FILENO);
-			return 1;
-		}
-
-		if (nparams == 1)
-			n = *njobs - 1;
-		else
-			n = atoi (params[1].word) - 1;
-		if (n < 0 || n >= *njobs)
-		{
-			fprintf (stderr, "xish: no such job\n");
-			dup2 (savestdin,  STDIN_FILENO);
-			dup2 (savestdout, STDOUT_FILENO);
-			return 1;
-		}
-		if (waitProcessGroup (0, (*jobs)[n].pgid, NULL))
-			(*jobs)[n].status = ST_JUSTSTP;
-		else
-			deleteJob (jobs, njobs, n);
-	}
-	else if (!strcmp (params[0].word, "bg"))
-	{
-		int n;
-		if (issubshell)
-		{
-			fprintf (stderr, "xish: bg: no job control\n");
-			dup2 (savestdin,  STDIN_FILENO);
-			dup2 (savestdout, STDOUT_FILENO);
-			return 1;
-		}
-
-		if (nparams == 1)
-		{
-			n = *njobs;
-			while (--n >= 0 && (*jobs)[n].status != ST_STOPPED);
-		}
-		else
-			n = atoi (params[1].word) - 1;
-		if (n < 0 || n >= *njobs)
-		{
-			fprintf (stderr, "xish: no such job\n");
-			dup2 (savestdin,  STDIN_FILENO);
-			dup2 (savestdout, STDOUT_FILENO);
-			return 1;
-		}
-		kill (-(*jobs)[n].pgid, SIGCONT);
-		printf ("[%d] %s\n", n + 1, (*jobs)[n].job);
-	}
+	else if (!strcmp (command[0].word, "cd"))
+		result = internalChangeDir (command, count);
+	else if (!strcmp (command[0].word, "jobs"))
+		result = internalJobs (command, count, jobs, njobs);
+	else if (!strcmp (command[0].word, "fg"))
+		result = internalForeground (command, count, jobs, njobs);
+	else if (!strcmp (command[0].word, "bg"))
+		result = internalBackground (command, count, jobs, njobs);
 
 	dup2 (savestdin,  STDIN_FILENO);
 	dup2 (savestdout, STDOUT_FILENO);
-	return 0;
+	return result;
 }
 
 /* Organizes i/o redirection. Returns pid of last process in the pipeline, responsible for <, >, >> and | */
@@ -805,7 +808,7 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 			pipe (pipes[1]);
 
 		if ((pid = fork ()) < 0)
-			fatalError ();
+			return (pid_t)nonfatal_error(NULL);
 		if (begin == 0 && !issubshell)
 			pgid = pid;
 		if (!pid)
@@ -824,10 +827,10 @@ pid_t doCommands (param_t *params, int nparams, job_t *jobs, int njobs)
 				close (pipes[1][1]);
 			}
 
-			if (dupFiles (params + begin, divider - begin))
-				exit (1);
+			if (dupFiles (params + begin, divider - begin) == -1)
+				exit (-1);
 			if ((command = removeRedirectors (params + begin, divider - begin, &count)) == NULL)
-				exit (1);
+				exit (-1);
 			executeCommand (command, count, jobs, njobs);
 		}
 		setpgid (pid, pgid);
@@ -861,14 +864,18 @@ int controlJob (param_t *params, int nparams, int isforeground, job_t **jobs, in
 			continue;
 		}
 
-		if ((pid = doCommands (params + begin, divider - begin, *jobs, *njobs)) < 0)
-			fatalError ();
+		if ((pid = doCommands (params + begin, divider - begin, *jobs, *njobs)) == (pid_t)-1)
+		{
+			exitstatus = -1;
+			begin = divider + 1;
+			continue;
+		}
 		pgid = getpgid (pid);
-		exitstatus = 1;
+		exitstatus = -1;
 
 		if (isforeground)
 		{
-			if (waitProcessGroup (pid, pgid, &exitstatus)) /* Check if process has stopped */
+			if (waitProcessGroup (pid, pgid, &exitstatus))
 				addJob (jobs, njobs, params + begin, divider - begin, pgid, ST_JUSTSTP);
 		}
 		else if (!issubshell)
@@ -898,7 +905,7 @@ int launchJobs (param_t *params, int nparams, job_t **jobs, int *njobs)
 		if (needcontrol)
 		{
 			if ((pid = fork ()) < 0)
-				fatalError ();
+				return nonfatal_error(NULL);
 			if (!pid)
 			{
 				setpgid (0, 0);
@@ -971,17 +978,15 @@ int setEnvVars ()
 	int len;
 
 	if ((len = readlink ("/proc/self/exe", buf, PATH_MAX - 1)) == -1)
-		return 1;
+		return nonfatal_error(NULL);
 	buf[len] = '\0';
 	if (setenv ("SHELL", buf, 1) == -1)
-		return 1;
-
+		return nonfatal_error(NULL);
 	sprintf (buf, "%d", geteuid ());
 	if (setenv ("EUID", buf, 1) == -1)
-		return 1;
-
+		return nonfatal_error(NULL);
 	if (getlogin_r (buf, PATH_MAX) || setenv ("USER", buf, 1) == -1)
-		return 1;
+		return nonfatal_error(NULL);
 
 	return 0;
 }
@@ -990,11 +995,7 @@ int setEnvVars ()
 int doInit ()
 {
 	if (setEnvVars ())
-	{
-		perror ("xish");
-		return 1;
-	}
-
+		return -1;
 	return 0;
 }
 
@@ -1019,28 +1020,25 @@ int main ()
 	int nparams, njobs = 0;
 	param_t *params = NULL;
 	job_t *jobs = NULL;
-	result_t ret;
+	result_t result;
 
 	signal (SIGINT,  SIG_IGN);
 	signal (SIGTSTP, SIG_IGN);
 	signal (SIGTTOU, SIG_IGN);
 
-	if (doInit ())
-		return 1;
+	if (doInit() == -1)
+		fprintf(stderr, "xish: initialisation failed, it is not advised to continue\n");
 	showPrompt ();
 
-	while ((ret = readCommand (&params, &nparams)) != RET_EOF)
+	while ((result = readCommand (&params, &nparams)) != RET_EOF)
 	{
-		if (checkSyntax (params, nparams))
-		{
-			placeEnv (params, nparams);
+		if (result != RET_MEMORYERR && checkSyntax (params, nparams) && placeEnv (params, nparams) != -1)
 			launchJobs (params, nparams, &jobs, &njobs);
-		}
+		checkJobs (&jobs, &njobs);
 		showJobs (jobs, njobs, 0);
 		deleteDoneJobs (&jobs, &njobs);
 		showPrompt ();
 		clearParams (&params, nparams);
-		checkJobs (&jobs, &njobs);
 	}
 
 	putchar ('\n');
