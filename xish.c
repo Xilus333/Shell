@@ -260,6 +260,7 @@ void checkJobs (job_t **jobs, int *njobs)
 	}
 }
 
+/* Deletes done jobs from jobs array */
 void deleteDoneJobs (job_t **jobs, int *njobs)
 {
 	int i;
@@ -285,13 +286,35 @@ word_t charType (char ch, word_t prev)
 	return WT_WORD;
 }
 
+/* Replaces environmental variable with its value */
+int placeEnv(char **param, int *len, char *environmental)
+{
+	char *env = getenv(environmental), *ptr;
+	int envlen;
+
+	if (env == NULL)
+		return 0;
+	envlen = strlen(env);
+
+	addChar(param, len, '\0');
+	*len += envlen - 1;
+	if ((ptr = realloc(*param, ((*len / STR_SIZE + 1) * STR_SIZE) * sizeof(char))) == NULL)
+		return nonfatal_error(errno, NULL);
+	*param = ptr;
+	strncpy(*param + *len - envlen, env, envlen);
+
+	return 0;
+}
+
+/* Removes everything in stdin until EOF or EOL */
 void flush_stdin()
 {
 	char ch;
 	while ((ch = getchar()) != '\n' && ch != EOF);
 }
 
-#define MEMORYOP(a) if ((a) == -1) { nonfatal_error(errno, NULL); flush_stdin(); return RET_MEMORYERR; }
+/* Little macros to check for memory errors in readCommand() */
+#define MEMORYOP(a) if ((a) == -1) { flush_stdin(); return RET_MEMORYERR; }
 
 /* Reads the infinite string and parses it into substrings array. Return statuses:
  * RET_OK  - command is correct
@@ -300,8 +323,9 @@ void flush_stdin()
  */
 result_t readCommand (param_t **params, int *nparams)
 {
-	enum { IN_WORD, IN_BETWEEN, IN_ESCAPE, IN_QUOTES, IN_SPECIAL } state = IN_BETWEEN, previous;
-	int ch, len = 0, type, bracketcnt = 0;
+	enum { IN_WORD, IN_BETWEEN, IN_ESCAPE, IN_QUOTES, IN_SPECIAL, IN_ENV } state = IN_BETWEEN, previous;
+	int ch, len, type, envlen, bracketcnt = 0;
+	char *environmental = NULL;
 
 	*nparams = 0;
 
@@ -360,6 +384,13 @@ result_t readCommand (param_t **params, int *nparams)
 					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
 					MEMORYOP(endString (&(*params)[*nparams - 1].word, 1));
 				}
+				else if (ch == '$')
+				{
+					state = IN_ENV;
+					MEMORYOP(addParam (params, nparams, WT_WORD));
+					len = 0;
+					envlen = 0;
+				}
 				else
 				{
 					state = IN_WORD;
@@ -368,6 +399,17 @@ result_t readCommand (param_t **params, int *nparams)
 					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
 				}
 				break;
+
+			case IN_ENV:
+				if (isalpha(ch))
+				{
+					MEMORYOP(addChar(&environmental, &envlen, ch));
+					break;
+				}
+				state = IN_WORD;
+				MEMORYOP(endString(&environmental, envlen));
+				MEMORYOP(placeEnv(&(*params)[*nparams - 1].word, &len, environmental));
+				free(environmental);
 
 			case IN_WORD:
 				if (ch == '(')
@@ -409,9 +451,14 @@ result_t readCommand (param_t **params, int *nparams)
 					state = IN_SPECIAL;
 					MEMORYOP(endString (&(*params)[*nparams - 1].word, len));
 					len = 0;
-					MEMORYOP(addParam (params, nparams, type))
+					MEMORYOP(addParam (params, nparams, type));
 					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
 					MEMORYOP(endString (&(*params)[*nparams - 1].word, 1));
+				}
+				else if (ch == '$')
+				{
+					state = IN_ENV;
+					envlen = 0;
 				}
 				else
 					MEMORYOP(addChar (&(*params)[*nparams - 1].word, &len, ch));
@@ -428,7 +475,7 @@ result_t readCommand (param_t **params, int *nparams)
 			case IN_QUOTES:
 				if (ch == '\n')
 					printf (CONT_PROMPT);
-				else if (ch == '\\')
+				if (ch == '\\')
 				{
 					previous = IN_QUOTES;
 					state = IN_ESCAPE;
@@ -443,65 +490,6 @@ result_t readCommand (param_t **params, int *nparams)
 				break;
 		}
 	}
-}
-
-/* Replaces environmental variables with their value */
-int placeEnv (param_t *params, int nparams)				/* Remake this maybe? */
-{
-	int i;
-
-	for (i = 0; i < nparams; ++i)
-	{
-		int len, posp = 0, poss = 0, ch;
-		char *s;
-
-		if (params[i].type != WT_WORD || (len = strlen (params[i].word)) < 2 || !strchr (params[i].word, '$'))
-			continue;
-
-		if ((s = calloc (STR_SIZE, sizeof (char))) == NULL)
-			return nonfatal_error(errno, NULL);
-		while (posp < len)
-		{
-			char *env;
-			int start;
-
-			while (posp < len && params[i].word[posp] != '$')
-			{
-				if (checkStringLen (&s, poss) == -1)
-					return -1;
-				s[poss++] = params[i].word[posp++];
-			}
-			if (posp == len)
-				break;
-			start = posp + 1;
-
-			while (++posp < len && isalpha ((int)params[i].word[posp]));
-
-			ch = params[i].word[posp];
-			params[i].word[posp] = '\0';
-			if ((env = getenv (params[i].word + start)) != NULL)
-			{
-				if ((poss + strlen (env) + 1) / STR_SIZE > poss / STR_SIZE)
-				{
-					char *ptr;
-					if ((ptr = realloc (s, ((poss + strlen (env) + 1) / STR_SIZE + 1) * STR_SIZE * sizeof (char))) == NULL)
-					{
-						free(s);
-						return nonfatal_error(errno, NULL);
-					}
-					s = ptr;
-				}
-				strcpy (s + poss, env);
-				poss += strlen (env);
-			}
-			params[i].word[posp] = ch;
-		}
-
-		endString (&s, poss);
-		free (params[i].word);
-		params[i].word = s;
-	}
-	return 0;
 }
 
 /* Checks if command is internal that must be executed in the main process */
@@ -1028,7 +1016,7 @@ int main (int argc, char **argv)
 
 	while ((result = readCommand (&params, &nparams)) != RET_EOF)
 	{
-		if (result != RET_MEMORYERR && checkSyntax (params, nparams) && placeEnv (params, nparams) != -1)
+		if (result != RET_MEMORYERR && checkSyntax (params, nparams))
 			launchJobs (params, nparams, &jobs, &njobs);
 		checkJobs (&jobs, &njobs);
 		showJobs (jobs, njobs, 0);
